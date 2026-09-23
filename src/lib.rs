@@ -6,15 +6,19 @@ const MAX_URL_LENGTH: usize = 2048;
 const SCAN_RATE_LIMIT_MAX: u64 = 30;
 const SCAN_RATE_LIMIT_WINDOW_SECS: u64 = 60;
 
+const DEMO_RATE_LIMIT_MAX: u64 = 5;
+const DEMO_RATE_LIMIT_WINDOW_SECS: u64 = 60;
+
 const KEYGEN_RATE_LIMIT_MAX: u64 = 3;
 const KEYGEN_RATE_LIMIT_WINDOW_SECS: u64 = 60 * 60;
 
 const CACHE_TTL_SECS: i64 = 60 * 60 * 24 * 7;
 
 const EXTENSION_ORIGINS: &[&str] = &[
-    "chrome-extension://EXTENSION_ID_NOT_SET",
     "moz-extension://e21d4d0c-ba42-4f63-adbe-442a4a17d6ad",
 ];
+
+const SITE_ORIGINS: &[&str] = &["https://xivlabs.tech", "https://aps.xivlabs.tech"];
 
 #[derive(Deserialize)]
 struct ScanRequest {
@@ -57,6 +61,7 @@ struct KeygenResponse {
 
 enum Caller {
     Extension(String),
+    Site(String),
     Api,
     Unknown,
 }
@@ -66,6 +71,9 @@ async fn identify_caller(req: &Request, env: &Env) -> Result<Caller> {
     if let Some(o) = origin {
         if EXTENSION_ORIGINS.contains(&o.as_str()) {
             return Ok(Caller::Extension(o));
+        }
+        if SITE_ORIGINS.contains(&o.as_str()) {
+            return Ok(Caller::Site(o));
         }
     }
     if let Ok(Some(provided_key)) = req.headers().get("X-API-Key") {
@@ -97,7 +105,7 @@ fn generate_api_key() -> String {
 
 fn add_cors_headers(response: &mut Response, caller: &Caller) -> Result<()> {
     let origin = match caller {
-        Caller::Extension(o) => o.as_str(),
+        Caller::Extension(o) | Caller::Site(o) => o.as_str(),
         Caller::Api | Caller::Unknown => "*",
     };
     let headers = response.headers_mut();
@@ -200,6 +208,12 @@ fn err(msg: &str, status: u16) -> Result<Response> {
     Response::error(msg, status)
 }
 
+fn bad_request(msg: &str, caller: &Caller) -> Result<Response> {
+    let mut res = err(msg, 400)?;
+    add_cors_headers(&mut res, caller)?;
+    Ok(res)
+}
+
 #[event(fetch)]
 pub async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
     if req.method() == Method::Options {
@@ -258,7 +272,11 @@ pub async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
 
     let ip = client_ip(&req);
     let kv = env.kv("RATE_LIMIT_KV")?;
-    if is_rate_limited(&kv, "scan", &ip, SCAN_RATE_LIMIT_MAX, SCAN_RATE_LIMIT_WINDOW_SECS).await? {
+    let (rl_prefix, rl_max, rl_window) = match caller {
+        Caller::Site(_) => ("demo", DEMO_RATE_LIMIT_MAX, DEMO_RATE_LIMIT_WINDOW_SECS),
+        _ => ("scan", SCAN_RATE_LIMIT_MAX, SCAN_RATE_LIMIT_WINDOW_SECS),
+    };
+    if is_rate_limited(&kv, rl_prefix, &ip, rl_max, rl_window).await? {
         let mut res = err("Rate limit exceeded. Try again in 60 seconds.", 429)?;
         res.headers_mut().set("Retry-After", "60")?;
         add_cors_headers(&mut res, &caller)?;
@@ -268,19 +286,19 @@ pub async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
     let mut req = req;
     let payload: ScanRequest = match req.json().await {
         Ok(p) => p,
-        Err(_) => return err("Invalid JSON payload", 400),
+        Err(_) => return bad_request("Invalid JSON payload", &caller),
     };
     if !validate_url(&payload.url) {
-        return err("Invalid or disallowed URL", 400);
+        return bad_request("Invalid or disallowed URL", &caller);
     }
 
     let parsed_url = match url::Url::parse(&payload.url) {
         Ok(u) => u,
-        Err(_) => return err("Malformed URL", 400),
+        Err(_) => return bad_request("Malformed URL", &caller),
     };
     let full_domain = match parsed_url.domain() {
         Some(d) if !d.is_empty() => d.to_string(),
-        _ => return err("No domain found in URL", 400),
+        _ => return bad_request("No domain found in URL", &caller),
     };
     let base_domain = extract_base_domain(&full_domain);
 

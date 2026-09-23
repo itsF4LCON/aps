@@ -2,7 +2,7 @@
 
 Sub-15ms phishing URL scanner on Cloudflare Workers, using Rust (WASM), Cloudflare D1, Workers AI (Llama 3.1), and Workers KV.
 
-A browser extension (Chrome + Firefox) scans links inline in Gmail; a public API is available for anyone else to integrate.
+A Firefox extension scans links inline in Gmail, a live demo runs on [xivlabs.tech](https://xivlabs.tech/#projects), a public API is available for anyone else to integrate.
 
 ## How it works
 
@@ -15,7 +15,8 @@ A browser extension (Chrome + Firefox) scans links inline in Gmail; a public API
 
 `/scan` requires one of:
 
-- **Browser extension** — trusted automatically via its `chrome-extension://` / `moz-extension://` origin, no key needed. See [`EXTENSION_ORIGINS`](src/lib.rs) — both browsers use a different scheme/ID for the same extension, so both must be listed.
+- **Browser extension** — trusted automatically via its `moz-extension://` origin, no key needed. See [`EXTENSION_ORIGINS`](src/lib.rs).
+- **Portfolio demo** — requests from `https://xivlabs.tech` / `https://aps.xivlabs.tech` ([`SITE_ORIGINS`](src/lib.rs)) need no key, but get a stricter rate limit.
 - **API key** — a `X-API-Key` header, generated for free via `POST /keygen` or the [key-generator page](https://api.xivlabs.tech) (`aps-api.html`). Keys are stored hashed (SHA-256) in D1, never in plaintext.
 
 Requests that match neither get `401 Unauthorized`.
@@ -27,6 +28,7 @@ Fixed-window, per-IP, tracked in Workers KV:
 | Endpoint  | Limit           |
 |-----------|-----------------|
 | `/scan`   | 30 / minute     |
+| `/scan` from the portfolio demo | 5 / minute |
 | `/keygen` | 3 / hour        |
 
 `/keygen` is stricter since each call writes a new row to `api_keys` — an unlimited endpoint would let one IP mint unbounded keys.
@@ -87,11 +89,11 @@ npx wrangler d1 execute phishing-db --remote --file=./schema.sql
 npx wrangler deploy
 ```
 
-After deploying, set `EXTENSION_ORIGINS` in [`src/lib.rs`](src/lib.rs) to the real extension IDs (`chrome://extensions` / `about:debugging` after loading unpacked) and redeploy — otherwise the extension gets `401` from `/scan`.
+After deploying, set `EXTENSION_ORIGINS` in [`src/lib.rs`](src/lib.rs) to the real extension ID (`about:debugging` after loading unpacked) and redeploy — otherwise the extension gets `401` from `/scan`.
 
 ## Browser extension
 
-Source: `mail_aps/` (loaded separately, not part of this crate). Manifest V3, with a background service worker that relays `/scan` calls — that's the only extension context whose `fetch()` carries the real `chrome-extension://`/`moz-extension://` origin the API trusts; content scripts inherit the host page's origin instead.
+Source: `mail_aps/` (loaded separately, not part of this crate). Manifest V3, with a background service worker that relays `/scan` calls — that's the only extension context whose `fetch()` carries the real `moz-extension://` origin the API trusts; content scripts inherit the host page's origin instead.
 
 ## Stack
 
