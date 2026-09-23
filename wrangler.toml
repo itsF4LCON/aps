@@ -1,0 +1,22 @@
+name = "aps"
+main = "build/index.js"
+compatibility_date = "2026-09-19"
+
+routes = [
+  { pattern = "api.xivlabs.tech", custom_domain = true }
+]
+
+[build]
+command = "cargo install -q \"worker-build@^0.8\" && worker-build --release"
+
+[[d1_databases]]
+binding = "phishing_db"
+database_name = "phishing-db"
+database_id = "3e092132-26aa-46dc-817b-a6d517b16743"
+
+[ai]
+binding = "AI"
+
+[[kv_namespaces]]
+binding = "RATE_LIMIT_KV"
+id = "14e2750166bc4cf89cd48766b57d8e72"

@@ -1,0 +1,16 @@
+CREATE TABLE IF NOT EXISTS blocked_domains (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    domain TEXT NOT NULL UNIQUE,
+    threat_score INTEGER NOT NULL,
+    flagged_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_domain ON blocked_domains(domain);
+
+CREATE TABLE IF NOT EXISTS api_keys (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    key_hash   TEXT    NOT NULL UNIQUE,
+    active     INTEGER NOT NULL DEFAULT 1,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_key_hash ON api_keys(key_hash);

@@ -1,0 +1,16 @@
+[package]
+name = "aps"
+version = "0.1.0"
+edition = "2021"
+authors = ["itsF4LCON <107556180+itsF4LCON@users.noreply.github.com>"]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+worker = { version = "0.8", features = ["d1"] }
+worker-macros = { version = "0.8" }
+serde = { version = "1.0", features = ["derive"] }
+url = "2.5.0"
+sha2 = { version = "0.10", default-features = false }
+js-sys = "0.3"
