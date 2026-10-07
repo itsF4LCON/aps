@@ -9,6 +9,7 @@ dependencies = [
  "getrandom",
  "psl",
  "serde",
+ "serde_json",
  "sha2",
  "url",
  "worker",

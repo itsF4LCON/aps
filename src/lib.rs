@@ -1,4 +1,5 @@
 pub mod policy;
+pub mod reputation;
 pub mod signals;
 pub mod target;
 pub mod verdict;
@@ -281,9 +282,10 @@ pub async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
 
     let mut evidence = verdict::Evidence {
         signals: signals::analyze(&target),
+        reputation: safe_browsing(&env, &target).await,
         ai: None,
     };
-    if verdict::needs_ai(&evidence.signals) {
+    if verdict::needs_ai(&evidence) {
         evidence.ai = Some(ai_opinion(&env, &target).await?);
     }
 
@@ -296,6 +298,27 @@ pub async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
     })?;
     add_cors_headers(&mut res, &caller)?;
     Ok(res)
+}
+
+/// Google Safe Browsing lookup. Skipped (None) when the `SAFE_BROWSING_API_KEY`
+/// secret is not set or the API is unreachable: the URL signals still apply.
+async fn safe_browsing(env: &Env, target: &target::Target) -> Option<String> {
+    let key = env.secret("SAFE_BROWSING_API_KEY").ok()?.to_string();
+    let body = serde_json::to_string(&reputation::request(&target.lookup_url)).ok()?;
+    let headers = Headers::new();
+    headers.set("Content-Type", "application/json").ok()?;
+    let mut init = RequestInit::new();
+    init.with_method(Method::Post)
+        .with_headers(headers)
+        .with_body(Some(body.into()));
+    let url = format!("{}?key={key}", reputation::ENDPOINT);
+    let req = Request::new_with_init(&url, &init).ok()?;
+    let mut res = Fetch::Request(req).send().await.ok()?;
+    if res.status_code() != 200 {
+        console_warn!("safe browsing lookup failed: HTTP {}", res.status_code());
+        return None;
+    }
+    res.json::<reputation::FindResponse>().await.ok()?.threat()
 }
 
 /// The model's BLOCK/SAFE opinion on a hostname, cached per host in D1.

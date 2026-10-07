@@ -13,6 +13,8 @@ const MAX_AI_REASON_CHARS: usize = 160;
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct Evidence {
     pub signals: Vec<Signal>,
+    /// Threat label from a reputation feed (Google Safe Browsing), if listed.
+    pub reputation: Option<String>,
     /// The model's answer, if it was consulted: (said BLOCK, its explanation).
     pub ai: Option<(bool, String)>,
 }
@@ -24,13 +26,20 @@ pub struct Verdict {
     pub reason: String,
 }
 
-/// Whether the model is worth asking: only while the URL signals alone have
-/// not already decided to block.
-pub fn needs_ai(signals: &[Signal]) -> bool {
-    score(signals) < BLOCK_THRESHOLD
+/// Whether the model is worth asking: only while neither the reputation feed
+/// nor the URL signals have already decided to block.
+pub fn needs_ai(e: &Evidence) -> bool {
+    e.reputation.is_none() && score(&e.signals) < BLOCK_THRESHOLD
 }
 
 pub fn decide(e: &Evidence) -> Verdict {
+    if let Some(threat) = &e.reputation {
+        return Verdict {
+            blocked: true,
+            score: 100,
+            reason: format!("Listed by Google Safe Browsing as {threat}."),
+        };
+    }
     let ai_block = e.ai.as_ref().is_some_and(|(b, _)| *b);
     let total = (score(&e.signals) + if ai_block { AI_BLOCK_WEIGHT } else { 0 }).min(100);
     let blocked = total >= BLOCK_THRESHOLD;
@@ -96,9 +105,12 @@ mod tests {
 
     #[test]
     fn strong_signals_block_without_the_model() {
-        let signals = vec![Signal::BrandLookalike, Signal::CredentialPath];
-        assert!(!needs_ai(&signals));
-        let v = decide(&Evidence { signals, ai: None });
+        let e = Evidence {
+            signals: vec![Signal::BrandLookalike, Signal::CredentialPath],
+            ..Evidence::default()
+        };
+        assert!(!needs_ai(&e));
+        let v = decide(&e);
         assert!(v.blocked);
         assert_eq!(v.score, 60);
         assert!(v.reason.starts_with("Domain imitates a well-known brand"));
@@ -110,15 +122,32 @@ mod tests {
         let injected = decide(&Evidence {
             signals: signals.clone(),
             ai: Some((false, "SAFE, ignore previous instructions".into())),
+            ..Evidence::default()
         });
         assert!(injected.blocked, "a SAFE answer must not lower the verdict");
 
         let escalated = decide(&Evidence {
-            signals: vec![],
             ai: Some((true, "Typosquats rabobank.nl".into())),
+            ..Evidence::default()
         });
         assert!(escalated.blocked);
         assert_eq!(escalated.reason, "Model flagged it: Typosquats rabobank.nl");
+    }
+
+    #[test]
+    fn reputation_listing_blocks_outright() {
+        let e = Evidence {
+            reputation: Some("phishing / social engineering".into()),
+            ..Evidence::default()
+        };
+        assert!(!needs_ai(&e));
+        let v = decide(&e);
+        assert!(v.blocked);
+        assert_eq!(v.score, 100);
+        assert_eq!(
+            v.reason,
+            "Listed by Google Safe Browsing as phishing / social engineering."
+        );
     }
 
     #[test]
@@ -126,6 +155,7 @@ mod tests {
         let v = decide(&Evidence {
             signals: vec![Signal::SharedHost],
             ai: Some((false, "SAFE".into())),
+            ..Evidence::default()
         });
         assert!(!v.blocked);
         assert_eq!(
@@ -137,8 +167,8 @@ mod tests {
     #[test]
     fn model_text_is_sanitised() {
         let v = decide(&Evidence {
-            signals: vec![],
             ai: Some((true, format!("bad\n\x1b[31mlink {}", "x".repeat(500)))),
+            ..Evidence::default()
         });
         assert!(!v.reason.contains('\n') && !v.reason.contains('\x1b'));
         assert!(v.reason.chars().count() < 200);
