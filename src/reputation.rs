@@ -9,6 +9,32 @@ use serde::{Deserialize, Serialize};
 
 pub const ENDPOINT: &str = "https://safebrowsing.googleapis.com/v4/threatMatches:find";
 
+/// Outcome of a reputation lookup.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Lookup {
+    /// Listed, with a human-readable threat label.
+    Listed(String),
+    Clean,
+    /// No API key configured: nothing to check, safe to cache.
+    NotConfigured,
+    /// Network error, quota, bad response: unknown, must not be cached as clean.
+    Failed,
+}
+
+impl Lookup {
+    pub fn threat(&self) -> Option<String> {
+        match self {
+            Lookup::Listed(t) => Some(t.clone()),
+            _ => None,
+        }
+    }
+
+    /// Whether a verdict built on this lookup may be cached.
+    pub fn cacheable(&self) -> bool {
+        !matches!(self, Lookup::Failed)
+    }
+}
+
 const THREAT_TYPES: &[&str] = &[
     "SOCIAL_ENGINEERING",
     "MALWARE",
@@ -92,6 +118,18 @@ impl FindResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_lookups_are_not_cacheable() {
+        assert!(!Lookup::Failed.cacheable());
+        assert!(Lookup::Clean.cacheable());
+        assert!(Lookup::NotConfigured.cacheable());
+        assert_eq!(
+            Lookup::Listed("malware".into()).threat().as_deref(),
+            Some("malware")
+        );
+        assert_eq!(Lookup::Failed.threat(), None);
+    }
 
     #[test]
     fn request_matches_the_documented_shape() {

@@ -275,25 +275,37 @@ pub async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
     Ok(res)
 }
 
-/// Google Safe Browsing lookup. Skipped (None) when the `SAFE_BROWSING_API_KEY`
-/// secret is not set or the API is unreachable: the URL signals still apply.
-async fn safe_browsing(env: &Env, target: &target::Target) -> Option<String> {
-    let key = env.secret("SAFE_BROWSING_API_KEY").ok()?.to_string();
-    let body = serde_json::to_string(&reputation::request(&target.lookup_url)).ok()?;
+/// Google Safe Browsing lookup. The key goes in a header, not the URL, so it
+/// never shows up in request logs.
+async fn safe_browsing(env: &Env, target: &target::Target) -> reputation::Lookup {
+    use reputation::Lookup;
+    let Ok(key) = env.secret("SAFE_BROWSING_API_KEY") else {
+        return Lookup::NotConfigured;
+    };
+    match safe_browsing_call(&key.to_string(), &target.lookup_url).await {
+        Ok(found) => found.threat().map_or(Lookup::Clean, Lookup::Listed),
+        Err(e) => {
+            console_warn!("safe browsing lookup failed: {e}");
+            Lookup::Failed
+        }
+    }
+}
+
+async fn safe_browsing_call(key: &str, url: &str) -> Result<reputation::FindResponse> {
+    let body = serde_json::to_string(&reputation::request(url))?;
     let headers = Headers::new();
-    headers.set("Content-Type", "application/json").ok()?;
+    headers.set("Content-Type", "application/json")?;
+    headers.set("X-Goog-Api-Key", key)?;
     let mut init = RequestInit::new();
     init.with_method(Method::Post)
         .with_headers(headers)
         .with_body(Some(body.into()));
-    let url = format!("{}?key={key}", reputation::ENDPOINT);
-    let req = Request::new_with_init(&url, &init).ok()?;
-    let mut res = Fetch::Request(req).send().await.ok()?;
+    let req = Request::new_with_init(reputation::ENDPOINT, &init)?;
+    let mut res = Fetch::Request(req).send().await?;
     if res.status_code() != 200 {
-        console_warn!("safe browsing lookup failed: HTTP {}", res.status_code());
-        return None;
+        return Err(Error::RustError(format!("HTTP {}", res.status_code())));
     }
-    res.json::<reputation::FindResponse>().await.ok()?.threat()
+    res.json().await
 }
 
 /// `None` as SQL NULL. `Option::into()` yields JS `undefined`, which D1 rejects,
@@ -331,12 +343,17 @@ async fn gather_evidence(env: &Env, target: &target::Target) -> Result<verdict::
         }
     }
 
-    evidence.reputation = safe_browsing(env, target).await;
+    let lookup = safe_browsing(env, target).await;
+    evidence.reputation = lookup.threat();
     evidence.ai = if verdict::needs_ai(&evidence) {
         Some(ai_opinion(env, target).await?)
     } else {
         None
     };
+    if !lookup.cacheable() {
+        // Unknown reputation must not be remembered as clean for 6 hours.
+        return Ok(evidence);
+    }
     let (ai_block, ai_reason) = match &evidence.ai {
         Some((b, r)) => (Some(i32::from(*b)), Some(r.clone())),
         None => (None, None),
