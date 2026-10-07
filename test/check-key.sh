@@ -13,6 +13,8 @@ if [ -z "$KEY" ]; then
   exit 1
 fi
 
+# Scan a non-trusted URL so the request exercises the full pipeline
+# (signals, reputation, model, D1 cache write), not the trusted shortcut.
 echo "Testing key against $BASE_URL ..."
 echo
 
@@ -20,7 +22,7 @@ body=$(curl -s -o /tmp/aps_key_body -w "%{http_code}" \
   -X POST "$BASE_URL/scan" \
   -H "Content-Type: application/json" \
   -H "X-API-Key: $KEY" \
-  -d '{"url":"https://github.com"}')
+  -d '{"url":"https://example.com/aps-smoke-test"}')
 
 echo "HTTP status: $body"
 echo "Response:    $(cat /tmp/aps_key_body)"
