@@ -1,7 +1,8 @@
-use serde::{Deserialize, Serialize};
-use worker::*;
+mod target;
 
-const MAX_URL_LENGTH: usize = 2048;
+use serde::{Deserialize, Serialize};
+use target::validate_url;
+use worker::*;
 
 const SCAN_RATE_LIMIT_MAX: u64 = 30;
 const SCAN_RATE_LIMIT_WINDOW_SECS: u64 = 60;
@@ -14,9 +15,7 @@ const KEYGEN_RATE_LIMIT_WINDOW_SECS: u64 = 60 * 60;
 
 const CACHE_TTL_SECS: i64 = 60 * 60 * 24 * 7;
 
-const EXTENSION_ORIGINS: &[&str] = &[
-    "moz-extension://e21d4d0c-ba42-4f63-adbe-442a4a17d6ad",
-];
+const EXTENSION_ORIGINS: &[&str] = &["moz-extension://e21d4d0c-ba42-4f63-adbe-442a4a17d6ad"];
 
 const SITE_ORIGINS: &[&str] = &["https://xivlabs.tech", "https://aps.xivlabs.tech"];
 
@@ -80,7 +79,10 @@ async fn identify_caller(req: &Request, env: &Env) -> Result<Caller> {
         let db = env.d1("phishing_db")?;
         let key_hash = sha256_hex(&provided_key);
         let stmt = db.prepare("SELECT 1 FROM api_keys WHERE key_hash = ?1 AND active = 1");
-        let found = stmt.bind(&[key_hash.into()])?.first::<i32>(Some("1")).await?;
+        let found = stmt
+            .bind(&[key_hash.into()])?
+            .first::<i32>(Some("1"))
+            .await?;
         if found.is_some() {
             return Ok(Caller::Api);
         }
@@ -143,20 +145,6 @@ async fn is_rate_limited(
         .execute()
         .await?;
     Ok(false)
-}
-
-fn validate_url(url: &str) -> bool {
-    if url.is_empty() || url.len() > MAX_URL_LENGTH {
-        return false;
-    }
-    let lower = url.to_lowercase();
-    if !lower.starts_with("http://") && !lower.starts_with("https://") {
-        return false;
-    }
-    if lower.contains("javascript:") || lower.contains("data:text") {
-        return false;
-    }
-    true
 }
 
 fn extract_base_domain(full_domain: &str) -> String {
@@ -352,7 +340,9 @@ pub async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
         max_tokens: 60,
     };
 
-    let ai_result: AiResponse = ai.run("@cf/meta/llama-3.1-8b-instruct-fast", &input).await?;
+    let ai_result: AiResponse = ai
+        .run("@cf/meta/llama-3.1-8b-instruct-fast", &input)
+        .await?;
     let is_malicious = ai_result.response.to_uppercase().contains("BLOCK");
     let score: i32 = if is_malicious { 90 } else { 0 };
 
