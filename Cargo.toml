@@ -13,4 +13,4 @@ worker-macros = { version = "0.8" }
 serde = { version = "1.0", features = ["derive"] }
 url = "2.5.0"
 sha2 = { version = "0.10", default-features = false }
-js-sys = "0.3"
+getrandom = { version = "0.2", features = ["js"] }

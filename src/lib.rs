@@ -93,14 +93,13 @@ fn sha256_hex(input: &str) -> String {
     format!("{:x}", Sha256::digest(input.as_bytes()))
 }
 
-fn generate_api_key() -> String {
-    use js_sys::Math;
-    let part = || {
-        let r = (Math::random() * 4_294_967_295.0) as u32;
-        format!("{:08x}", r)
-    };
-    let key_body: String = (0..4).map(|_| part()).collect();
-    format!("aps_{}", key_body)
+/// 128 bits from the platform CSPRNG (`crypto.getRandomValues` on Workers).
+/// `Math.random()` is not cryptographically secure, so keys made with it were guessable.
+fn generate_api_key() -> Result<String> {
+    let mut bytes = [0u8; 16];
+    getrandom::getrandom(&mut bytes).map_err(|e| Error::RustError(format!("rng: {e}")))?;
+    let body: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    Ok(format!("aps_{body}"))
 }
 
 fn add_cors_headers(response: &mut Response, caller: &Caller) -> Result<()> {
@@ -246,7 +245,7 @@ pub async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
             return Ok(res);
         }
 
-        let key = generate_api_key();
+        let key = generate_api_key()?;
         let key_hash = sha256_hex(&key);
         let db = env.d1("phishing_db")?;
         let stmt = db.prepare(
