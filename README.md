@@ -28,7 +28,8 @@ can clear a URL that an earlier layer flagged.
    |---|---|
    | brand lookalike: `paypa1.com`, `micros0ft.com`, Cyrillic `аррӏе.com`, or a brand name on a domain the brand doesn't own (`paypal.support`) | 50 |
    | brand name or lookalike as a subdomain of an unrelated site: `paypal.com.account-check.example` | 50 |
-   | combosquat: a brand plus other words, `paypal-verify.pages.dev`, `appleid-help.com` | 45 |
+   | combosquat: a brand plus a support or login word, `paypal-verify.pages.dev`, `appleid-help.com` | 45 |
+   | exact brand name on a country domain missing from the brand's list (`paypal.at`): often the real company, so weaker | 30 |
    | text before `@` hiding the real host | 40 |
    | raw IP address | 30 |
    | punycode hostname | 25 |
@@ -69,8 +70,9 @@ password-reset and session tokens there. Some services put such tokens in the pa
   reputation database. Without the Safe Browsing key, a well-built phishing page on a fresh,
   neutral-looking domain can pass.
 - **Brand list.** It is short and hand-picked (names of 5+ characters to avoid false positives).
-  Brands outside it rely on the model. Country domains a brand owns but that are missing from
-  its list show up as lookalikes. That alone doesn't block, but it raises the score.
+  Brands outside it rely on the model. A country domain missing from a brand's list scores 30,
+  so a real login page there doesn't block, but neither does a phishing domain like
+  `paypal.com.co`. Those are left to Safe Browsing and the model.
 - **Lookalike folding** covers the scripts used in common IDN attacks, not all of Unicode's
   confusables.
 - **Registries in the PSL's private section** (`uk.com`, `eu.com`, …) count as shared hosts.
@@ -79,6 +81,9 @@ password-reset and session tokens there. Some services put such tokens in the pa
   client can send a forged `Origin` header. Those requests still go through the rate limits.
 - **Rate limits** live in Workers KV, which is eventually consistent, so the limits are
   approximate under bursts.
+- **Query strings on trusted hosts.** Any URL with a query string, even
+  `accounts.google.com/signin?continue=…`, goes through the full analysis, which costs a
+  lookup and possibly a model call.
 - **Cache misses cost money.** The cache is per URL, so a client that scans random paths misses
   it every time, and each miss can cost a Safe Browsing lookup and a model call. Only the
   per-IP rate limits bound this.
@@ -176,6 +181,9 @@ Optional reputation lookups need a
 ```bash
 npx wrangler secret put SAFE_BROWSING_API_KEY
 ```
+
+URLs cached as clean before the key was set are re-checked only when their 6-hour entry
+expires.
 
 ## Deploy
 
