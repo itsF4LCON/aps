@@ -1,4 +1,4 @@
-mod target;
+pub mod target;
 
 use serde::{Deserialize, Serialize};
 use target::validate_url;
@@ -147,18 +147,6 @@ async fn is_rate_limited(
     Ok(false)
 }
 
-fn extract_base_domain(full_domain: &str) -> String {
-    let parts: Vec<&str> = full_domain.split('.').collect();
-    if parts.len() > 2 {
-        let sld = parts[parts.len() - 2];
-        if matches!(sld, "co" | "com" | "net" | "org") {
-            return parts[parts.len().saturating_sub(3)..].join(".");
-        }
-        return parts[parts.len().saturating_sub(2)..].join(".");
-    }
-    full_domain.to_string()
-}
-
 fn is_cache_stale(flagged_at: &str) -> bool {
     let now_secs = Date::now().as_millis() / 1000;
     let cutoff = now_secs as i64 - CACHE_TTL_SECS;
@@ -279,17 +267,16 @@ pub async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
         return bad_request("Invalid or disallowed URL", &caller);
     }
 
-    let parsed_url = match url::Url::parse(&payload.url) {
-        Ok(u) => u,
-        Err(_) => return bad_request("Malformed URL", &caller),
+    let target = match target::parse(&payload.url) {
+        Ok(t) => t,
+        Err(msg) => return bad_request(msg, &caller),
     };
-    let full_domain = match parsed_url.domain() {
-        Some(d) if !d.is_empty() => d.to_string(),
-        _ => return bad_request("No domain found in URL", &caller),
-    };
-    let base_domain = extract_base_domain(&full_domain);
 
-    if TRUSTED_DOMAINS.iter().any(|&td| base_domain == td) {
+    if target
+        .registrable
+        .as_deref()
+        .is_some_and(|r| TRUSTED_DOMAINS.contains(&r))
+    {
         let mut res = Response::from_json(&ScanResponse {
             blocked: false,
             reason: "Verified trusted domain.".into(),
@@ -301,7 +288,7 @@ pub async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
     let db = env.d1("phishing_db")?;
     let cached = db
         .prepare("SELECT threat_score, flagged_at FROM blocked_domains WHERE domain = ?1")
-        .bind(&[base_domain.clone().into()])?
+        .bind(&[target.host.clone().into()])?
         .first::<CachedRow>(None)
         .await?;
 
@@ -311,9 +298,9 @@ pub async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
             let mut res = Response::from_json(&ScanResponse {
                 blocked,
                 reason: if blocked {
-                    "Base domain found in known threat database.".into()
+                    "Host found in known threat database.".into()
                 } else {
-                    "Base domain verified as safe in cache.".into()
+                    "Host verified as safe in cache.".into()
                 },
             })?;
             add_cors_headers(&mut res, &caller)?;
@@ -326,15 +313,16 @@ pub async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
         messages: vec![
             ChatMessage {
                 role: "system".into(),
-                content: "You are a phishing detector. Evaluate a parsed base domain from an \
+                content: "You are a phishing detector. Evaluate a hostname from an \
                            email link. ONLY output 'BLOCK' if the domain is clearly \
-                           typosquatting a known brand (e.g. paypa1.com) or is a known scam \
-                           domain. Otherwise output 'SAFE'. Provide a max 15-word reason."
+                           typosquatting or impersonating a known brand (e.g. paypa1.com, \
+                           paypal.com.account-check.example) or is a known scam domain. \
+                           Otherwise output 'SAFE'. Provide a max 15-word reason."
                     .into(),
             },
             ChatMessage {
                 role: "user".into(),
-                content: format!("Base Domain: {}", base_domain),
+                content: format!("Hostname: {}", target.host),
             },
         ],
         max_tokens: 60,
@@ -353,7 +341,7 @@ pub async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
            threat_score = excluded.threat_score, \
            flagged_at   = CURRENT_TIMESTAMP",
     )
-    .bind(&[base_domain.into(), score.into()])?
+    .bind(&[target.host.into(), score.into()])?
     .run()
     .await?;
 
