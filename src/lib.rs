@@ -1,5 +1,7 @@
 pub mod policy;
+pub mod signals;
 pub mod target;
+pub mod verdict;
 
 use serde::{Deserialize, Serialize};
 use target::validate_url;
@@ -25,10 +27,14 @@ struct ScanRequest {
     url: String,
 }
 
+/// `blocked` and `reason` are what the extension and site read; `score` and
+/// `signals` were added later and are safe for older clients to ignore.
 #[derive(Serialize)]
 struct ScanResponse {
     blocked: bool,
     reason: String,
+    score: u32,
+    signals: Vec<signals::Signal>,
 }
 
 #[derive(Serialize)]
@@ -266,31 +272,43 @@ pub async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
         let mut res = Response::from_json(&ScanResponse {
             blocked: false,
             reason: "Verified trusted host.".into(),
+            score: 0,
+            signals: Vec::new(),
         })?;
         add_cors_headers(&mut res, &caller)?;
         return Ok(res);
     }
 
+    let mut evidence = verdict::Evidence {
+        signals: signals::analyze(&target),
+        ai: None,
+    };
+    if verdict::needs_ai(&evidence.signals) {
+        evidence.ai = Some(ai_opinion(&env, &target).await?);
+    }
+
+    let v = verdict::decide(&evidence);
+    let mut res = Response::from_json(&ScanResponse {
+        blocked: v.blocked,
+        reason: v.reason,
+        score: v.score,
+        signals: evidence.signals,
+    })?;
+    add_cors_headers(&mut res, &caller)?;
+    Ok(res)
+}
+
+/// The model's BLOCK/SAFE opinion on a hostname, cached per host in D1.
+async fn ai_opinion(env: &Env, target: &target::Target) -> Result<(bool, String)> {
     let db = env.d1("phishing_db")?;
     let cached = db
         .prepare("SELECT threat_score, flagged_at FROM blocked_domains WHERE domain = ?1")
         .bind(&[target.host.clone().into()])?
         .first::<CachedRow>(None)
         .await?;
-
     if let Some(row) = cached {
         if !is_cache_stale(&row.flagged_at) {
-            let blocked = row.threat_score > 80;
-            let mut res = Response::from_json(&ScanResponse {
-                blocked,
-                reason: if blocked {
-                    "Host found in known threat database.".into()
-                } else {
-                    "Host verified as safe in cache.".into()
-                },
-            })?;
-            add_cors_headers(&mut res, &caller)?;
-            return Ok(res);
+            return Ok((row.threat_score > 80, String::new()));
         }
     }
 
@@ -327,14 +345,9 @@ pub async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
            threat_score = excluded.threat_score, \
            flagged_at   = CURRENT_TIMESTAMP",
     )
-    .bind(&[target.host.into(), score.into()])?
+    .bind(&[target.host.clone().into(), score.into()])?
     .run()
     .await?;
 
-    let mut res = Response::from_json(&ScanResponse {
-        blocked: is_malicious,
-        reason: ai_result.response.trim().to_string(),
-    })?;
-    add_cors_headers(&mut res, &caller)?;
-    Ok(res)
+    Ok((is_malicious, ai_result.response))
 }
