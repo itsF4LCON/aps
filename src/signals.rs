@@ -174,6 +174,7 @@ pub enum Signal {
     UserinfoInUrl,
     BrandLookalike,
     BrandCombosquat,
+    BrandOnCountryDomain,
     BrandInSubdomain,
     CredentialHost,
     IpLiteralHost,
@@ -192,6 +193,7 @@ impl Signal {
             Signal::BrandLookalike => 50,
             Signal::BrandInSubdomain => 50,
             Signal::BrandCombosquat => 45,
+            Signal::BrandOnCountryDomain => 30,
             Signal::CredentialHost => 15,
             Signal::UserinfoInUrl => 40,
             Signal::IpLiteralHost => 30,
@@ -209,6 +211,9 @@ impl Signal {
         match self {
             Signal::BrandLookalike => "domain imitates a well-known brand",
             Signal::BrandCombosquat => "domain combines a brand name with other words",
+            Signal::BrandOnCountryDomain => {
+                "brand name on a country domain the brand is not known to own"
+            }
             Signal::CredentialHost => "hostname contains login or account words",
             Signal::BrandInSubdomain => "brand name used as a subdomain of an unrelated site",
             Signal::UserinfoInUrl => "text before '@' disguises the real host",
@@ -264,6 +269,16 @@ pub fn analyze(target: &Target) -> Vec<Signal> {
                 .as_deref()
                 .and_then(|l| brand_match(&confusable_skeleton(l)))
             {
+                // The exact brand on a country domain missing from our list
+                // is often the real company (amazon.com.mx, paypal.at), so it
+                // gets a weaker signal than a typo or a generic TLD.
+                Some(BrandMatch::Typo)
+                    if !shared
+                        && label.as_deref().is_some_and(|l| BRANDS.contains(&l))
+                        && on_country_tld(target) =>
+                {
+                    out.push(Signal::BrandOnCountryDomain)
+                }
                 Some(BrandMatch::Typo) => out.push(Signal::BrandLookalike),
                 Some(BrandMatch::Combo) => out.push(Signal::BrandCombosquat),
                 None => {}
@@ -346,6 +361,18 @@ fn split_host(target: &Target) -> (Option<String>, Vec<String>) {
         .map(|s| s.split('.').map(str::to_string).collect())
         .unwrap_or_default();
     (Some(label), subdomains)
+}
+
+/// The registrable domain sits under a country-code TLD (`.at`, `.com.mx`).
+fn on_country_tld(target: &Target) -> bool {
+    let Some(registrable) = target.registrable.as_deref() else {
+        return false;
+    };
+    psl::suffix(registrable.as_bytes())
+        .filter(|s| s.typ() == Some(psl::Type::Icann))
+        .and_then(|s| std::str::from_utf8(s.as_bytes()).ok().map(str::to_string))
+        .and_then(|suffix| suffix.rsplit('.').next().map(str::to_string))
+        .is_some_and(|tld| tld.len() == 2 && tld.bytes().all(|b| b.is_ascii_alphabetic()))
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -484,6 +511,21 @@ mod tests {
     }
 
     #[test]
+    fn brand_login_pages_on_unlisted_country_domains_do_not_block() {
+        for url in [
+            "https://www.amazon.com.mx/ap/signin",
+            "https://amazon.sg/ap/signin",
+            "https://www.paypal.at/signin",
+            "https://www.catawiki.co.uk/account",
+            "https://accounts.google.com.mx/signin",
+        ] {
+            assert!(!blocked(url), "{url}: {:?}", sig(url));
+        }
+        // Typos on a country domain still count as full lookalikes.
+        assert!(sig("https://paypa1.at/").contains(&Signal::BrandLookalike));
+    }
+
+    #[test]
     fn microsoft_and_apple_service_domains() {
         assert!(!blocked("https://outlook.office.com/owa/auth/logon.aspx"));
         assert!(!blocked("https://outlook.live.com/owa/"));
@@ -539,7 +581,9 @@ mod tests {
     #[test]
     fn brand_name_on_a_domain_the_brand_does_not_own() {
         assert!(blocked("https://paypal.support/login"));
-        assert!(blocked("https://paypal.com.co/signin"));
+        // A country domain may be the real company, so it only flags.
+        let co = sig("https://paypal.com.co/signin");
+        assert!(co.contains(&Signal::BrandOnCountryDomain), "{co:?}");
         assert!(sig("https://apple.xyz/account/verify").contains(&Signal::BrandLookalike));
         // The review's pages.dev case: exact brand on a shared host.
         assert!(blocked("https://paypal.pages.dev/login"));
