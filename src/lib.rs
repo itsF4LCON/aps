@@ -1,3 +1,4 @@
+pub mod policy;
 pub mod target;
 
 use serde::{Deserialize, Serialize};
@@ -168,17 +169,6 @@ fn is_cache_stale(flagged_at: &str) -> bool {
     approx < cutoff
 }
 
-const TRUSTED_DOMAINS: &[&str] = &[
-    "google.com",
-    "github.com",
-    "paypal.com",
-    "microsoft.com",
-    "apple.com",
-    "amazon.com",
-    "catawiki.com",
-    "catawiki.nl",
-];
-
 fn err(msg: &str, status: u16) -> Result<Response> {
     Response::error(msg, status)
 }
@@ -272,14 +262,10 @@ pub async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
         Err(msg) => return bad_request(msg, &caller),
     };
 
-    if target
-        .registrable
-        .as_deref()
-        .is_some_and(|r| TRUSTED_DOMAINS.contains(&r))
-    {
+    if policy::is_trusted(&target) {
         let mut res = Response::from_json(&ScanResponse {
             blocked: false,
-            reason: "Verified trusted domain.".into(),
+            reason: "Verified trusted host.".into(),
         })?;
         add_cors_headers(&mut res, &caller)?;
         return Ok(res);
