@@ -345,13 +345,19 @@ async fn gather_evidence(env: &Env, target: &target::Target) -> Result<verdict::
 
     let lookup = safe_browsing(env, target).await;
     evidence.reputation = lookup.threat();
-    evidence.ai = if verdict::needs_ai(&evidence) {
-        Some(ai_opinion(env, target).await?)
-    } else {
-        None
-    };
-    if !lookup.cacheable() {
-        // Unknown reputation must not be remembered as clean for 6 hours.
+    let mut cacheable = lookup.cacheable();
+    if verdict::needs_ai(&evidence) {
+        match ai_opinion(env, target).await {
+            Ok(answer) => evidence.ai = Some(answer),
+            Err(e) => {
+                // The URL signals still give a verdict; just don't cache it.
+                console_warn!("workers ai failed: {e}");
+                cacheable = false;
+            }
+        }
+    }
+    if !cacheable {
+        // An unknown result must not be remembered as clean for 6 hours.
         return Ok(evidence);
     }
     let (ai_block, ai_reason) = match &evidence.ai {

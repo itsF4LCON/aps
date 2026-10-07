@@ -73,11 +73,12 @@ pub fn decide(e: &Evidence) -> Verdict {
     }
 }
 
-/// The model is told to start with BLOCK or SAFE. Only the first word counts:
-/// "SAFE, nothing to block here" must not read as BLOCK.
+/// The model is told to start with BLOCK or SAFE but sometimes adds a preamble.
+/// The first of the two words decides: "SAFE, nothing to block here" is SAFE,
+/// "Based on the URL, BLOCK" is BLOCK. Neither word means SAFE.
 pub fn parse_ai_answer(text: &str) -> bool {
     text.split(|c: char| !c.is_ascii_alphanumeric())
-        .find(|w| !w.is_empty())
+        .find(|w| w.eq_ignore_ascii_case("block") || w.eq_ignore_ascii_case("safe"))
         .is_some_and(|w| w.eq_ignore_ascii_case("block"))
 }
 
@@ -179,6 +180,11 @@ mod tests {
         assert!(!parse_ai_answer("SAFE, nothing to block here"));
         assert!(!parse_ai_answer("SAFE"));
         assert!(!parse_ai_answer(""));
+        assert!(parse_ai_answer(
+            "Based on the URL, BLOCK. Fake PayPal login."
+        ));
+        assert!(!parse_ai_answer("I cannot determine this."));
+        assert!(!parse_ai_answer("Blocked content")); // whole words only
     }
 
     #[test]
