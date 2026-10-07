@@ -391,11 +391,26 @@ fn brand_match(label: &str) -> Option<BrandMatch> {
         return Some(BrandMatch::Typo);
     }
     let combo = folded.split('-').chain(label.split('-')).any(|word| {
-        BRANDS
-            .iter()
-            .any(|b| word.starts_with(b) || (word.len() >= 6 && near_miss(word, b)))
+        BRANDS.iter().any(|b| {
+            word == *b
+                || (word.len() >= 6 && near_miss(word, b))
+                || word.strip_prefix(b).is_some_and(telling_suffix)
+        })
     });
     combo.then_some(BrandMatch::Combo)
+}
+
+/// Words glued onto a brand in phishing domains (`appleid`, `paypalsecure`,
+/// `microsoftonline`). Without one, a brand prefix is usually just a longer
+/// word: `applebees`, `appleton`, `amazonas`.
+const COMBO_SUFFIXES: &[&str] = &[
+    "id", "support", "help", "helpdesk", "care", "service", "services", "store", "pay", "cloud",
+    "security", "team", "online", "center", "centre", "desk", "alert", "alerts", "notice", "mail",
+    "app", "apps", "official", "refund", "gift", "play",
+];
+
+fn telling_suffix(rest: &str) -> bool {
+    COMBO_SUFFIXES.contains(&rest) || CREDENTIAL_WORDS.iter().any(|c| rest.starts_with(c))
 }
 
 /// One or two edits away from a brand of 6+ characters. Shorter brands only
@@ -564,6 +579,16 @@ mod tests {
         assert!(!blocked("https://apples.com/"));
         assert!(!blocked("https://outlook-cafe.nl/"));
         assert!(!sig("https://apply.com/").contains(&Signal::BrandLookalike));
+        for url in [
+            "https://www.applebees.com/en/account",
+            "https://login.applebees.com/",
+            "https://www.appleton.org/login",
+            "https://appleinsider.com/",
+            "https://amazonas.gov.br/",
+        ] {
+            assert!(!sig(url).contains(&Signal::BrandCombosquat), "{url}");
+            assert!(!blocked(url), "{url}");
+        }
     }
 
     #[test]
