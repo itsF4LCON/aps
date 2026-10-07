@@ -162,7 +162,9 @@ const RISKY_TLDS: &[&str] = &[
 pub enum Signal {
     UserinfoInUrl,
     BrandLookalike,
+    BrandCombosquat,
     BrandInSubdomain,
+    CredentialHost,
     IpLiteralHost,
     PunycodeHost,
     BrandInPath,
@@ -178,6 +180,8 @@ impl Signal {
         match self {
             Signal::BrandLookalike => 50,
             Signal::BrandInSubdomain => 50,
+            Signal::BrandCombosquat => 45,
+            Signal::CredentialHost => 15,
             Signal::UserinfoInUrl => 40,
             Signal::IpLiteralHost => 30,
             Signal::PunycodeHost => 25,
@@ -193,6 +197,8 @@ impl Signal {
     pub fn describe(self) -> &'static str {
         match self {
             Signal::BrandLookalike => "domain imitates a well-known brand",
+            Signal::BrandCombosquat => "domain combines a brand name with other words",
+            Signal::CredentialHost => "hostname contains login or account words",
             Signal::BrandInSubdomain => "brand name used as a subdomain of an unrelated site",
             Signal::UserinfoInUrl => "text before '@' disguises the real host",
             Signal::IpLiteralHost => "raw IP address instead of a domain",
@@ -228,6 +234,10 @@ pub fn analyze(target: &Target) -> Vec<Signal> {
     }
 
     let (label, subdomains) = split_host(target);
+    // Match on the decoded path: /%6cogin is /login.
+    let path = percent_encoding::percent_decode_str(&target.path)
+        .decode_utf8_lossy()
+        .to_ascii_lowercase();
     // On a shared host the "owner" is the platform, not the page author, so
     // sites.google.com/view/paypal-login is still checked for brands.
     let owned = target
@@ -238,27 +248,38 @@ pub fn analyze(target: &Target) -> Vec<Signal> {
     if !brand_owner {
         // On brand-owned user-content hosts (sites.google.com) the label is
         // the platform's own name, so only the subdomains and path can lie.
-        if !owned
-            && label
+        if !owned {
+            match label
                 .as_deref()
-                .is_some_and(|l| is_brand_lookalike(&confusable_skeleton(l)))
-        {
-            out.push(Signal::BrandLookalike);
+                .and_then(|l| brand_match(&confusable_skeleton(l)))
+            {
+                Some(BrandMatch::Typo) => out.push(Signal::BrandLookalike),
+                Some(BrandMatch::Combo) => out.push(Signal::BrandCombosquat),
+                None => {}
+            }
         }
         let in_sub = subdomains
             .iter()
-            .flat_map(|s| s.split('-'))
-            .any(|tok| BRANDS.contains(&tok));
+            .any(|s| brand_match(&confusable_skeleton(s)).is_some());
         if in_sub {
             out.push(Signal::BrandInSubdomain);
         }
-        let path = target.path.to_ascii_lowercase();
         if BRANDS.iter().any(|b| path.contains(b)) {
             out.push(Signal::BrandInPath);
         }
+        let host_words = subdomains
+            .iter()
+            .map(String::as_str)
+            .chain(label.as_deref());
+        let credential_host = host_words
+            .flat_map(|l| l.split('-'))
+            .any(|w| CREDENTIAL_WORDS.iter().any(|c| w.starts_with(c)));
+        if credential_host && !owned {
+            out.push(Signal::CredentialHost);
+        }
     }
 
-    if has_credential_word(&target.path) {
+    if has_credential_word(&path) {
         out.push(Signal::CredentialPath);
     }
     if subdomains.len() >= 4 {
@@ -316,28 +337,37 @@ fn split_host(target: &Target) -> (Option<String>, Vec<String>) {
     (Some(label), subdomains)
 }
 
-/// `paypa1`, `paypal-secure`, `micros0ft`, `arnazon`, and the exact brand name
-/// itself (only called for domains the brand does not own) -> true.
-fn is_brand_lookalike(label: &str) -> bool {
-    let normalized = normalize_homoglyphs(label);
-    let candidates = std::iter::once(normalized.as_str())
-        .chain(normalized.split('-'))
-        .chain(label.split('-'));
-    for cand in candidates {
-        for brand in BRANDS {
-            if cand == *brand {
-                return true;
-            }
-            let max_edits = if brand.len() >= 8 { 2 } else { 1 };
-            // Avoid matching short unrelated words of a different length class.
-            if cand.len().abs_diff(brand.len()) <= max_edits
-                && damerau_levenshtein(cand, brand) <= max_edits
-            {
-                return true;
-            }
-        }
+#[derive(Debug, PartialEq, Eq)]
+enum BrandMatch {
+    /// The whole label is the brand or a near miss: `paypa1`, `arnazon`,
+    /// `paypal` itself on a domain PayPal does not own.
+    Typo,
+    /// A word in the label starts with a brand: `paypal-verify`, `appleid-help`,
+    /// `paypalsecure`, `microsoftonline-login`.
+    Combo,
+}
+
+fn brand_match(label: &str) -> Option<BrandMatch> {
+    let folded = normalize_homoglyphs(label);
+    if BRANDS.iter().any(|b| folded == *b || near_miss(&folded, b)) {
+        return Some(BrandMatch::Typo);
     }
-    false
+    let combo = folded.split('-').chain(label.split('-')).any(|word| {
+        BRANDS
+            .iter()
+            .any(|b| word.starts_with(b) || (word.len() >= 6 && near_miss(word, b)))
+    });
+    combo.then_some(BrandMatch::Combo)
+}
+
+/// One or two edits away from a brand of 6+ characters. Shorter brands only
+/// match exactly (after homoglyph folding): `apply` is not `apple`.
+fn near_miss(word: &str, brand: &str) -> bool {
+    if brand.len() < 6 || word == brand {
+        return false;
+    }
+    let max_edits = if brand.len() >= 8 { 2 } else { 1 };
+    word.len().abs_diff(brand.len()) <= max_edits && damerau_levenshtein(word, brand) <= max_edits
 }
 
 /// Decodes a punycode label and maps characters that look like ASCII letters
@@ -431,13 +461,49 @@ mod tests {
     }
 
     #[test]
-    fn typosquats_and_combosquats() {
+    fn typosquats() {
         assert!(sig("https://paypa1.com/").contains(&Signal::BrandLookalike));
         assert!(sig("https://micros0ft.com/").contains(&Signal::BrandLookalike));
         assert!(sig("https://arnazon.com/").contains(&Signal::BrandLookalike));
-        assert!(sig("https://paypal-secure-login.com/").contains(&Signal::BrandLookalike));
         assert!(sig("https://catawlki.nl/").contains(&Signal::BrandLookalike));
-        assert!(sig("https://paypal-verify.pages.dev/").contains(&Signal::BrandLookalike));
+    }
+
+    #[test]
+    fn combosquats() {
+        for url in [
+            "https://paypal-secure-login.com/",
+            "https://paypal-verify.pages.dev/",
+            "https://paypalsecure.com/",
+            "https://appleid-verify.com/",
+            "https://microsoftonline-login.com/",
+        ] {
+            assert!(sig(url).contains(&Signal::BrandCombosquat), "{url}");
+        }
+        // A combosquat with login words in the domain blocks on its own.
+        assert!(blocked("https://paypal-secure-login.com/"));
+        assert!(blocked("https://appleid-verify.com/"));
+        assert!(blocked("https://microsoftonline-login.com/"));
+    }
+
+    #[test]
+    fn brand_words_alone_do_not_block() {
+        assert!(!blocked("https://apply-now.com/account"));
+        assert!(!blocked("https://google-tips.blog/login"));
+        assert!(!blocked("https://apples.com/"));
+        assert!(!blocked("https://outlook-cafe.nl/"));
+        assert!(!sig("https://apply.com/").contains(&Signal::BrandLookalike));
+    }
+
+    #[test]
+    fn lookalikes_in_subdomains() {
+        assert!(blocked("https://paypa1.evil.example/login"));
+    }
+
+    #[test]
+    fn percent_encoded_paths_are_decoded() {
+        let s = sig("https://evil.example/%6cogin/%70aypal");
+        assert!(s.contains(&Signal::CredentialPath));
+        assert!(s.contains(&Signal::BrandInPath));
     }
 
     #[test]
