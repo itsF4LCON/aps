@@ -35,11 +35,97 @@ pub const BRANDS: &[&str] = &[
 ];
 
 /// Official registrable domains that contain a brand name plus extra words.
-const OFFICIAL_BRAND_DOMAINS: &[&str] = &[
+/// Registrable domains the brands really own. Ownership is decided by this
+/// list, never by the label alone: `paypal.support` and `apple.xyz` are not
+/// PayPal's or Apple's. Country domains are listed for the big brands; a
+/// missing one shows up as a lookalike, which alone does not block.
+const OFFICIAL_DOMAINS: &[&str] = &[
+    // PayPal
+    "paypal.com",
+    "paypal.me",
+    "paypalobjects.com",
+    "paypal.de",
+    "paypal.fr",
+    "paypal.it",
+    "paypal.es",
+    "paypal.nl",
+    "paypal.co.uk",
+    "paypal.com.au",
+    "paypal.ca",
+    // Google
+    "google.com",
+    "google.co.uk",
+    "google.de",
+    "google.nl",
+    "google.fr",
+    "google.es",
+    "google.it",
+    "google.be",
+    "google.ca",
+    "google.com.au",
+    "google.co.jp",
+    "google.co.in",
+    "google.com.br",
+    "google.ch",
+    "google.at",
+    "google.pl",
+    "google.se",
     "google-analytics.com",
+    "googleapis.com",
+    "googlevideo.com",
+    "googletagmanager.com",
+    "googlesyndication.com",
+    // Microsoft
+    "microsoft.com",
+    "microsoftonline.com",
+    "microsoft365.com",
+    "office365.com",
+    "outlook.com",
+    // Apple
+    "apple.com",
+    "icloud.com",
+    // Amazon
+    "amazon.com",
+    "amazon.co.uk",
+    "amazon.de",
+    "amazon.nl",
+    "amazon.fr",
+    "amazon.es",
+    "amazon.it",
+    "amazon.ca",
+    "amazon.co.jp",
+    "amazon.com.au",
+    "amazon.in",
+    "amazon.com.br",
+    "amazon.se",
+    "amazon.pl",
+    "amazon.com.be",
     "amazon-adsystem.com",
-    "paypal-community.com",
-    "paypal-objects.com",
+    // Others
+    "github.com",
+    "github.blog",
+    "githubassets.com",
+    "catawiki.com",
+    "catawiki.nl",
+    "catawiki.de",
+    "catawiki.fr",
+    "catawiki.be",
+    "catawiki.it",
+    "catawiki.es",
+    "netflix.com",
+    "netflix.net",
+    "facebook.com",
+    "facebook.net",
+    "instagram.com",
+    "whatsapp.com",
+    "whatsapp.net",
+    "linkedin.com",
+    "dropbox.com",
+    "docusign.com",
+    "docusign.net",
+    "coinbase.com",
+    "binance.com",
+    "metamask.io",
 ];
 
 /// Matched as prefixes of path words, and of adjacent word pairs so that
@@ -144,14 +230,15 @@ pub fn analyze(target: &Target) -> Vec<Signal> {
     let (label, subdomains) = split_host(target);
     // On a shared host the "owner" is the platform, not the page author, so
     // sites.google.com/view/paypal-login is still checked for brands.
-    let brand_owner = !shared
-        && (label.as_deref().is_some_and(|l| BRANDS.contains(&l))
-            || target
-                .registrable
-                .as_deref()
-                .is_some_and(|r| OFFICIAL_BRAND_DOMAINS.contains(&r)));
+    let owned = target
+        .registrable
+        .as_deref()
+        .is_some_and(|r| OFFICIAL_DOMAINS.contains(&r));
+    let brand_owner = !shared && owned;
     if !brand_owner {
-        if label.as_deref().is_some_and(is_brand_lookalike) {
+        // On brand-owned user-content hosts (sites.google.com) the label is
+        // the platform's own name, so only the subdomains and path can lie.
+        if !owned && label.as_deref().is_some_and(is_brand_lookalike) {
             out.push(Signal::BrandLookalike);
         }
         let in_sub = subdomains
@@ -225,11 +312,9 @@ fn split_host(target: &Target) -> (Option<String>, Vec<String>) {
     (Some(label), subdomains)
 }
 
-/// `paypa1`, `paypal-secure`, `micros0ft`, `arnazon` -> true; `paypal` -> false.
+/// `paypa1`, `paypal-secure`, `micros0ft`, `arnazon`, and the exact brand name
+/// itself (only called for domains the brand does not own) -> true.
 fn is_brand_lookalike(label: &str) -> bool {
-    if BRANDS.contains(&label) {
-        return false;
-    }
     let normalized = normalize_homoglyphs(label);
     let candidates = std::iter::once(normalized.as_str())
         .chain(normalized.split('-'))
@@ -317,10 +402,21 @@ mod tests {
     }
 
     #[test]
+    fn brand_name_on_a_domain_the_brand_does_not_own() {
+        assert!(blocked("https://paypal.support/login"));
+        assert!(blocked("https://paypal.com.co/signin"));
+        assert!(sig("https://apple.xyz/account/verify").contains(&Signal::BrandLookalike));
+        // The review's pages.dev case: exact brand on a shared host.
+        assert!(blocked("https://paypal.pages.dev/login"));
+        assert!(blocked("https://microsoft.github.io/signin"));
+    }
+
+    #[test]
     fn real_brand_domains_are_not_lookalikes() {
         for url in [
             "https://paypal.com/",
             "https://www.paypal.de/",
+            "https://www.paypalobjects.com/",
             "https://google.co.uk/",
             "https://www.google-analytics.com/",
             "https://applebees.com/",
@@ -355,6 +451,10 @@ mod tests {
         assert!(page.contains(&Signal::BrandInPath));
         assert!(page.contains(&Signal::CredentialPath));
         assert!(!blocked("https://someone.github.io/blog/"));
+        assert!(!blocked("https://sites.google.com/view/team-wiki"));
+        assert!(!blocked(
+            "https://docs.google.com/forms/d/e/1FAIpQL/viewform"
+        ));
     }
 
     #[test]
