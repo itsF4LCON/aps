@@ -31,6 +31,7 @@ pub struct Target {
     pub path: String,
     /// Credentials before the host (`https://paypal.com@evil.example/`).
     pub has_userinfo: bool,
+    pub has_query: bool,
     /// The query or path carries another URL (open-redirect pattern).
     pub embedded_url: bool,
     /// `scheme://host/path` without query or fragment. Used as the cache key
@@ -68,13 +69,21 @@ pub fn parse(raw: &str) -> Result<Target, &'static str> {
         is_ip,
         path,
         has_userinfo: !url.username().is_empty() || url.password().is_some(),
+        has_query: url.query().is_some_and(|q| !q.is_empty()),
         embedded_url,
     })
 }
 
+/// Browsers accept `https:/x`, `https:\\x` and `\\\\x` as URLs too, so match
+/// loosely: anything with a scheme separator or a leading double slash.
 fn looks_like_url(value: &str) -> bool {
     let v = value.trim().to_ascii_lowercase();
-    v.starts_with("http://") || v.starts_with("https://") || v.starts_with("//")
+    v.contains("://")
+        || v.contains(":\\")
+        || v.starts_with("//")
+        || v.starts_with("\\\\")
+        || v.starts_with("http:")
+        || v.starts_with("https:")
 }
 
 #[cfg(test)]
@@ -147,6 +156,11 @@ mod tests {
         assert!(t("https://x.example/r?to=//evil.example").embedded_url);
         assert!(t("https://x.example/go/https%3A%2F%2Fevil.example").embedded_url);
         assert!(!t("https://x.example/search?q=phishing").embedded_url);
+        assert!(t("https://x.example/r?u=https:/evil.example").embedded_url);
+        assert!(t("https://x.example/r?u=https:%5C%5Cevil.example").embedded_url);
+        assert!(t("https://x.example/r?u=%5C%5Cevil.example").embedded_url);
+        assert!(t("https://x.example/?q=a").has_query);
+        assert!(!t("https://x.example/?").has_query);
     }
 
     #[test]

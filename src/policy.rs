@@ -9,8 +9,6 @@ pub const TRUSTED_HOSTS: &[&str] = &[
     "www.google.com",
     "accounts.google.com",
     "mail.google.com",
-    "github.com",
-    "www.github.com",
     "paypal.com",
     "www.paypal.com",
     "microsoft.com",
@@ -54,6 +52,20 @@ pub const USER_CONTENT_HOSTS: &[&str] = &[
     "trycloudflare.com",
 ];
 
+/// Paths that bounce the visitor elsewhere on otherwise trusted hosts
+/// (`www.google.com/url?q=`, `/amp/s/evil.example`).
+const REDIRECT_PATH_PREFIXES: &[&str] = &[
+    "/url",
+    "/amp/",
+    "/aclk",
+    "/imgres",
+    "/link",
+    "/redirect",
+    "/l/",
+    "/r/",
+    "/out",
+];
+
 /// `host` equals `suffix` or is a subdomain of it.
 fn host_is_or_under(host: &str, suffix: &str) -> bool {
     host == suffix
@@ -76,11 +88,17 @@ pub fn is_shared_host(target: &Target) -> bool {
             .any(|h| host_is_or_under(&target.host, h))
 }
 
-/// Whether the scan may stop early with a "trusted" verdict.
+/// Whether the scan may stop early with a "trusted" verdict. Deliberately
+/// narrow: an exact trusted host, no query string (redirect parameters come in
+/// too many encodings to enumerate) and no redirect-style path. Anything else
+/// is simply analysed like any other URL.
 pub fn is_trusted(target: &Target) -> bool {
+    let path = target.path.to_ascii_lowercase();
     TRUSTED_HOSTS.contains(&target.host.as_str())
+        && !target.has_query
         && !target.embedded_url
         && !target.has_userinfo
+        && !REDIRECT_PATH_PREFIXES.iter().any(|p| path.starts_with(p))
         && !is_shared_host(target)
 }
 
@@ -101,7 +119,7 @@ mod tests {
     fn exact_trusted_hosts_pass() {
         assert!(trusted("https://accounts.google.com/signin"));
         assert!(trusted("https://www.paypal.com/myaccount"));
-        assert!(trusted("https://github.com/rust-lang/rust"));
+        assert!(trusted("https://www.google.com/"));
     }
 
     #[test]
@@ -118,7 +136,20 @@ mod tests {
         assert!(!trusted(
             "https://www.google.com/url?q=https://evil.example"
         ));
+        assert!(!trusted("https://www.google.com/url?q=evil.example"));
+        assert!(!trusted("https://www.google.com/url?q=https:/evil.example"));
+        assert!(!trusted(
+            "https://www.google.com/url?q=https:%5C%5Cevil.example"
+        ));
+        assert!(!trusted("https://www.google.com/amp/s/evil.example/login"));
         assert!(!trusted("https://paypal.com@evil.example/"));
+    }
+
+    #[test]
+    fn github_is_user_content_not_trusted() {
+        assert!(!trusted(
+            "https://github.com/x/y/releases/download/v1/setup.exe"
+        ));
     }
 
     #[test]
