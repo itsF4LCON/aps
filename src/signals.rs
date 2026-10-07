@@ -238,7 +238,11 @@ pub fn analyze(target: &Target) -> Vec<Signal> {
     if !brand_owner {
         // On brand-owned user-content hosts (sites.google.com) the label is
         // the platform's own name, so only the subdomains and path can lie.
-        if !owned && label.as_deref().is_some_and(is_brand_lookalike) {
+        if !owned
+            && label
+                .as_deref()
+                .is_some_and(|l| is_brand_lookalike(&confusable_skeleton(l)))
+        {
             out.push(Signal::BrandLookalike);
         }
         let in_sub = subdomains
@@ -336,6 +340,41 @@ fn is_brand_lookalike(label: &str) -> bool {
     false
 }
 
+/// Decodes a punycode label and maps characters that look like ASCII letters
+/// to those letters: Cyrillic `аррӏе` -> `apple`, `pаypаl` -> `paypal`.
+/// A small subset of Unicode's confusables (UTS #39) covering the scripts
+/// actually used in IDN homograph attacks.
+fn confusable_skeleton(label: &str) -> String {
+    let (unicode, _) = idna::domain_to_unicode(label);
+    unicode
+        .chars()
+        .map(|c| match c {
+            'а' | 'α' | 'à' | 'á' | 'â' | 'ä' | 'ã' | 'å' | 'ā' => 'a',
+            'Ь' | 'ь' | 'Ꮟ' => 'b',
+            'с' | 'ϲ' | 'ç' => 'c',
+            'ԁ' => 'd',
+            'е' | 'ё' | 'ε' | 'è' | 'é' | 'ê' | 'ë' | 'ē' => 'e',
+            'ɡ' => 'g',
+            'һ' => 'h',
+            'і' | 'ї' | 'ı' | 'ɩ' | 'ι' | 'ì' | 'í' | 'î' | 'ï' => 'i',
+            'ј' => 'j',
+            'κ' | 'к' => 'k',
+            'ӏ' | 'ⅼ' => 'l',
+            'ո' | 'ñ' => 'n',
+            'о' | 'ο' | 'ö' | 'ò' | 'ó' | 'ô' | 'õ' | 'ø' => 'o',
+            'р' | 'ρ' => 'p',
+            'ԛ' => 'q',
+            'ѕ' => 's',
+            'υ' | 'ü' | 'ù' | 'ú' | 'û' => 'u',
+            'ν' => 'v',
+            'ԝ' | 'ѡ' => 'w',
+            'х' | 'χ' => 'x',
+            'у' | 'ү' | 'ý' | 'ÿ' => 'y',
+            other => other,
+        })
+        .collect()
+}
+
 fn normalize_homoglyphs(s: &str) -> String {
     s.replace("rn", "m")
         .replace("vv", "w")
@@ -409,6 +448,20 @@ mod tests {
         // The review's pages.dev case: exact brand on a shared host.
         assert!(blocked("https://paypal.pages.dev/login"));
         assert!(blocked("https://microsoft.github.io/signin"));
+    }
+
+    #[test]
+    fn idn_homographs_are_lookalikes() {
+        // The well-known all-Cyrillic "аррӏе.com" proof of concept.
+        assert!(blocked("https://xn--80ak6aa92e.com/login"));
+        assert!(blocked("https://p\u{0430}yp\u{0430}l.com/login"));
+        assert!(blocked("https://g\u{043e}\u{043e}gle.com/login"));
+        assert_eq!(confusable_skeleton("xn--80ak6aa92e"), "apple");
+        // A genuine non-Latin domain is not a lookalike of anything.
+        assert!(
+            !sig("https://\u{043f}\u{0440}\u{0438}\u{043c}\u{0435}\u{0440}.\u{0440}\u{0444}/")
+                .contains(&Signal::BrandLookalike)
+        );
     }
 
     #[test]
