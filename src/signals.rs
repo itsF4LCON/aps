@@ -34,7 +34,6 @@ pub const BRANDS: &[&str] = &[
     "metamask",
 ];
 
-/// Official registrable domains that contain a brand name plus extra words.
 /// Registrable domains the brands really own. Ownership is decided by this
 /// list, never by the label alone: `paypal.support` and `apple.xyz` are not
 /// PayPal's or Apple's. Country domains are listed for the big brands; a
@@ -75,15 +74,22 @@ const OFFICIAL_DOMAINS: &[&str] = &[
     "googlevideo.com",
     "googletagmanager.com",
     "googlesyndication.com",
+    "googleusercontent.com",
+    "googlesource.com",
+    "google.org",
     // Microsoft
     "microsoft.com",
     "microsoftonline.com",
     "microsoft365.com",
     "office365.com",
     "outlook.com",
+    "office.com",
+    "live.com",
     // Apple
     "apple.com",
     "icloud.com",
+    "cdn-apple.com",
+    "apple.co",
     // Amazon
     "amazon.com",
     "amazon.co.uk",
@@ -101,8 +107,11 @@ const OFFICIAL_DOMAINS: &[&str] = &[
     "amazon.pl",
     "amazon.com.be",
     "amazon-adsystem.com",
+    "amazonaws.com",
     // Others
     "github.com",
+    "github.dev",
+    "githubusercontent.com",
     "github.blog",
     "githubassets.com",
     "catawiki.com",
@@ -116,11 +125,13 @@ const OFFICIAL_DOMAINS: &[&str] = &[
     "netflix.net",
     "facebook.com",
     "facebook.net",
+    "facebookmail.com",
     "instagram.com",
     "whatsapp.com",
     "whatsapp.net",
     "linkedin.com",
     "dropbox.com",
+    "dropboxusercontent.com",
     "docusign.com",
     "docusign.net",
     "coinbase.com",
@@ -458,6 +469,25 @@ mod tests {
 
     fn blocked(url: &str) -> bool {
         score(&sig(url)) >= BLOCK_THRESHOLD
+    }
+
+    #[test]
+    fn user_content_hosts_never_block_on_their_own() {
+        for host in crate::policy::USER_CONTENT_HOSTS {
+            let url = format!("https://{host}/a/b");
+            assert!(!blocked(&url), "{url}: {:?}", sig(&url));
+            let sub = format!("https://x.{host}/a/b");
+            assert!(!blocked(&sub), "{sub}: {:?}", sig(&sub));
+        }
+        assert!(!blocked("https://lh3.googleusercontent.com/a/xyz"));
+        assert!(!blocked("https://dl.dropboxusercontent.com/s/abc/file.pdf"));
+    }
+
+    #[test]
+    fn microsoft_and_apple_service_domains() {
+        assert!(!blocked("https://outlook.office.com/owa/auth/logon.aspx"));
+        assert!(!blocked("https://outlook.live.com/owa/"));
+        assert!(!blocked("https://appleid.cdn-apple.com/x"));
     }
 
     #[test]
