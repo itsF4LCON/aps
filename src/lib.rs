@@ -344,7 +344,10 @@ async fn gather_evidence(env: &Env, target: &target::Target) -> Result<verdict::
     }
 
     let lookup = safe_browsing(env, target).await;
-    evidence.reputation = lookup.threat();
+    // A failed re-check must not erase a listing we already know about.
+    if lookup != reputation::Lookup::Failed {
+        evidence.reputation = lookup.threat();
+    }
     let mut cacheable = lookup.cacheable();
     if verdict::needs_ai(&evidence) {
         match ai_opinion(env, target).await {
