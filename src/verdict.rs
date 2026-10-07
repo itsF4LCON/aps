@@ -73,6 +73,14 @@ pub fn decide(e: &Evidence) -> Verdict {
     }
 }
 
+/// The model is told to start with BLOCK or SAFE. Only the first word counts:
+/// "SAFE, nothing to block here" must not read as BLOCK.
+pub fn parse_ai_answer(text: &str) -> bool {
+    text.split(|c: char| !c.is_ascii_alphanumeric())
+        .find(|w| !w.is_empty())
+        .is_some_and(|w| w.eq_ignore_ascii_case("block"))
+}
+
 /// Model output is untrusted text: single line, printable, bounded.
 fn clean(s: &str) -> String {
     let one_line: String = s
@@ -162,6 +170,15 @@ mod tests {
             v.reason,
             "Low risk: Hosted on a platform where anyone can publish"
         );
+    }
+
+    #[test]
+    fn model_answer_is_read_from_its_first_word() {
+        assert!(parse_ai_answer("BLOCK: typosquats paypal.com"));
+        assert!(parse_ai_answer("**Block** - impersonates a bank"));
+        assert!(!parse_ai_answer("SAFE, nothing to block here"));
+        assert!(!parse_ai_answer("SAFE"));
+        assert!(!parse_ai_answer(""));
     }
 
     #[test]
