@@ -296,6 +296,12 @@ async fn safe_browsing(env: &Env, target: &target::Target) -> Option<String> {
     res.json::<reputation::FindResponse>().await.ok()?.threat()
 }
 
+/// `None` as SQL NULL. `Option::into()` yields JS `undefined`, which D1 rejects,
+/// so binding it directly made every cache write fail.
+fn nullable<T: Into<wasm_bindgen::JsValue>>(v: Option<T>) -> wasm_bindgen::JsValue {
+    v.map_or(wasm_bindgen::JsValue::NULL, Into::into)
+}
+
 /// URL signals (always recomputed) plus the remote checks, which are cached
 /// per `lookup_url` in D1 with the TTLs in [`cache`].
 async fn gather_evidence(env: &Env, target: &target::Target) -> Result<verdict::Evidence> {
@@ -344,9 +350,9 @@ async fn gather_evidence(env: &Env, target: &target::Target) -> Result<verdict::
     )
     .bind(&[
         target.lookup_url.clone().into(),
-        evidence.reputation.clone().into(),
-        ai_block.into(),
-        ai_reason.into(),
+        nullable(evidence.reputation.clone()),
+        nullable(ai_block),
+        nullable(ai_reason),
         (now as f64).into(),
     ])?
     .run()
