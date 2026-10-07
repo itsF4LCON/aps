@@ -1,3 +1,4 @@
+pub mod cache;
 pub mod policy;
 pub mod reputation;
 pub mod signals;
@@ -16,8 +17,6 @@ const DEMO_RATE_LIMIT_WINDOW_SECS: u64 = 60;
 
 const KEYGEN_RATE_LIMIT_MAX: u64 = 3;
 const KEYGEN_RATE_LIMIT_WINDOW_SECS: u64 = 60 * 60;
-
-const CACHE_TTL_SECS: i64 = 60 * 60 * 24 * 7;
 
 const EXTENSION_ORIGINS: &[&str] = &["moz-extension://e21d4d0c-ba42-4f63-adbe-442a4a17d6ad"];
 
@@ -55,10 +54,14 @@ struct AiResponse {
     response: String,
 }
 
+/// One row of `verdict_cache`: the remote checks for one URL.
 #[derive(Deserialize)]
-struct CachedRow {
-    threat_score: i32,
-    flagged_at: String,
+struct CacheRow {
+    reputation: Option<String>,
+    /// NULL when the model was not consulted.
+    ai_block: Option<i32>,
+    ai_reason: Option<String>,
+    checked_at: i64,
 }
 
 #[derive(Serialize)]
@@ -153,27 +156,6 @@ async fn is_rate_limited(
         .execute()
         .await?;
     Ok(false)
-}
-
-fn is_cache_stale(flagged_at: &str) -> bool {
-    let now_secs = Date::now().as_millis() / 1000;
-    let cutoff = now_secs as i64 - CACHE_TTL_SECS;
-    let parts: Vec<&str> = flagged_at.split_whitespace().collect();
-    if parts.len() != 2 {
-        return true;
-    }
-    let d: Vec<i64> = parts[0].split('-').filter_map(|s| s.parse().ok()).collect();
-    let t: Vec<i64> = parts[1].split(':').filter_map(|s| s.parse().ok()).collect();
-    if d.len() != 3 || t.len() != 3 {
-        return true;
-    }
-    let approx = (d[0] - 1970) * 31_536_000
-        + (d[1] - 1) * 2_592_000
-        + (d[2] - 1) * 86_400
-        + t[0] * 3_600
-        + t[1] * 60
-        + t[2];
-    approx < cutoff
 }
 
 fn err(msg: &str, status: u16) -> Result<Response> {
@@ -280,14 +262,7 @@ pub async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
         return Ok(res);
     }
 
-    let mut evidence = verdict::Evidence {
-        signals: signals::analyze(&target),
-        reputation: safe_browsing(&env, &target).await,
-        ai: None,
-    };
-    if verdict::needs_ai(&evidence) {
-        evidence.ai = Some(ai_opinion(&env, &target).await?);
-    }
+    let evidence = gather_evidence(&env, &target).await?;
 
     let v = verdict::decide(&evidence);
     let mut res = Response::from_json(&ScanResponse {
@@ -321,20 +296,66 @@ async fn safe_browsing(env: &Env, target: &target::Target) -> Option<String> {
     res.json::<reputation::FindResponse>().await.ok()?.threat()
 }
 
-/// The model's BLOCK/SAFE opinion on a hostname, cached per host in D1.
-async fn ai_opinion(env: &Env, target: &target::Target) -> Result<(bool, String)> {
+/// URL signals (always recomputed) plus the remote checks, which are cached
+/// per `lookup_url` in D1 with the TTLs in [`cache`].
+async fn gather_evidence(env: &Env, target: &target::Target) -> Result<verdict::Evidence> {
+    let mut evidence = verdict::Evidence {
+        signals: signals::analyze(target),
+        ..verdict::Evidence::default()
+    };
+    let now = (Date::now().as_millis() / 1000) as i64;
     let db = env.d1("phishing_db")?;
     let cached = db
-        .prepare("SELECT threat_score, flagged_at FROM blocked_domains WHERE domain = ?1")
-        .bind(&[target.host.clone().into()])?
-        .first::<CachedRow>(None)
+        .prepare(
+            "SELECT reputation, ai_block, ai_reason, checked_at \
+             FROM verdict_cache WHERE url = ?1",
+        )
+        .bind(&[target.lookup_url.clone().into()])?
+        .first::<CacheRow>(None)
         .await?;
     if let Some(row) = cached {
-        if !is_cache_stale(&row.flagged_at) {
-            return Ok((row.threat_score > 80, String::new()));
+        let flagged = row.reputation.is_some() || row.ai_block == Some(1);
+        evidence.reputation = row.reputation;
+        evidence.ai = row
+            .ai_block
+            .map(|b| (b == 1, row.ai_reason.unwrap_or_default()));
+        let complete = evidence.ai.is_some() || !verdict::needs_ai(&evidence);
+        if complete && cache::is_fresh(row.checked_at, now, flagged) {
+            return Ok(evidence);
         }
     }
 
+    evidence.reputation = safe_browsing(env, target).await;
+    evidence.ai = if verdict::needs_ai(&evidence) {
+        Some(ai_opinion(env, target).await?)
+    } else {
+        None
+    };
+    let (ai_block, ai_reason) = match &evidence.ai {
+        Some((b, r)) => (Some(i32::from(*b)), Some(r.clone())),
+        None => (None, None),
+    };
+    db.prepare(
+        "INSERT INTO verdict_cache (url, reputation, ai_block, ai_reason, checked_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5) \
+         ON CONFLICT(url) DO UPDATE SET \
+           reputation = excluded.reputation, ai_block = excluded.ai_block, \
+           ai_reason = excluded.ai_reason, checked_at = excluded.checked_at",
+    )
+    .bind(&[
+        target.lookup_url.clone().into(),
+        evidence.reputation.clone().into(),
+        ai_block.into(),
+        ai_reason.into(),
+        (now as f64).into(),
+    ])?
+    .run()
+    .await?;
+    Ok(evidence)
+}
+
+/// The model's BLOCK/SAFE opinion on a hostname.
+async fn ai_opinion(env: &Env, target: &target::Target) -> Result<(bool, String)> {
     let ai = env.ai("AI")?;
     let input = AiBody {
         messages: vec![
@@ -354,23 +375,9 @@ async fn ai_opinion(env: &Env, target: &target::Target) -> Result<(bool, String)
         ],
         max_tokens: 60,
     };
-
     let ai_result: AiResponse = ai
         .run("@cf/meta/llama-3.1-8b-instruct-fast", &input)
         .await?;
     let is_malicious = ai_result.response.to_uppercase().contains("BLOCK");
-    let score: i32 = if is_malicious { 90 } else { 0 };
-
-    db.prepare(
-        "INSERT INTO blocked_domains (domain, threat_score, flagged_at) \
-         VALUES (?1, ?2, CURRENT_TIMESTAMP) \
-         ON CONFLICT(domain) DO UPDATE SET \
-           threat_score = excluded.threat_score, \
-           flagged_at   = CURRENT_TIMESTAMP",
-    )
-    .bind(&[target.host.clone().into(), score.into()])?
-    .run()
-    .await?;
-
     Ok((is_malicious, ai_result.response))
 }

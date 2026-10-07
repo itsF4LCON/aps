@@ -1,3 +1,6 @@
+-- Per-URL cache of the remote checks (reputation feed and model), with Unix
+-- timestamps. Replaces blocked_domains, which cached one verdict per base
+-- domain with a 7-day TTL for every result.
 CREATE TABLE IF NOT EXISTS verdict_cache (
     url        TEXT    PRIMARY KEY,  -- scheme://host/path, no query string
     reputation TEXT,                 -- Safe Browsing threat label, NULL if not listed
@@ -6,10 +9,6 @@ CREATE TABLE IF NOT EXISTS verdict_cache (
     checked_at INTEGER NOT NULL      -- Unix seconds
 );
 
-CREATE TABLE IF NOT EXISTS api_keys (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    key_hash   TEXT    NOT NULL UNIQUE,
-    active     INTEGER NOT NULL DEFAULT 1,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-);
-CREATE INDEX IF NOT EXISTS idx_key_hash ON api_keys(key_hash);
+-- The old cache is no longer read. Its rows are disposable; drop it once the
+-- new Worker is deployed:
+-- DROP TABLE IF EXISTS blocked_domains;
