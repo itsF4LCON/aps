@@ -143,6 +143,30 @@ mod tests {
         assert_eq!(escalated.reason, "Model flagged it: Typosquats rabobank.nl");
     }
 
+    /// Keeps the example response in README.md honest.
+    #[test]
+    fn readme_example() {
+        let target =
+            crate::target::parse("https://paypal.com.account-check.example/login").unwrap();
+        let signals = crate::signals::analyze(&target);
+        let names = serde_json::to_value(&signals).unwrap();
+        assert_eq!(
+            names,
+            serde_json::json!(["brand_in_subdomain", "credential_host", "credential_path"])
+        );
+        let v = decide(&Evidence {
+            signals,
+            ..Evidence::default()
+        });
+        assert!(v.blocked);
+        assert_eq!(v.score, 75);
+        assert_eq!(
+            v.reason,
+            "Brand name used as a subdomain of an unrelated site; hostname contains login or \
+             account words; path asks for a login or account action"
+        );
+    }
+
     #[test]
     fn reputation_listing_blocks_outright() {
         let e = Evidence {

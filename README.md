@@ -18,20 +18,24 @@ can clear a URL that an earlier layer flagged.
    is always what gets analysed.
 2. **Trusted hosts.** A short list of exact hostnames (`accounts.google.com`, `www.paypal.com`, …)
    returns SAFE immediately. Matching is on the full hostname, so `sites.google.com` does not
-   inherit trust from `google.com`. Trust is refused for shared hosts, embedded redirect URLs
-   (`google.com/url?q=…`) and `user@host` tricks.
+   inherit trust from `google.com`. Trust is refused for anything with a query string or a
+   redirect-style path (`/url`, `/amp/`, …), for shared hosts and for `user@host` tricks. Those
+   URLs go through the full analysis instead. `github.com` is deliberately not trusted, because
+   release downloads and raw files there are user content.
 3. **URL signals** ([`src/signals.rs`](src/signals.rs)), each with a weight; a score of 60+ blocks:
 
    | signal | weight |
    |---|---|
-   | brand lookalike: `paypa1.com`, `micros0ft.com`, `paypal-secure-login.com` (edit distance after folding homoglyphs) | 50 |
-   | brand name as a subdomain of an unrelated site: `paypal.com.account-check.example` | 50 |
+   | brand lookalike: `paypa1.com`, `micros0ft.com`, Cyrillic `аррӏе.com`, or a brand name on a domain the brand doesn't own (`paypal.support`) | 50 |
+   | brand name or lookalike as a subdomain of an unrelated site: `paypal.com.account-check.example` | 50 |
+   | combosquat: a brand plus other words, `paypal-verify.pages.dev`, `appleid-help.com` | 45 |
    | text before `@` hiding the real host | 40 |
    | raw IP address | 30 |
    | punycode hostname | 25 |
    | brand in the path of an unrelated site | 15 |
    | shared host where anyone can publish (PSL private suffixes, Google Sites/Forms/Drive, SharePoint, …) | 15 |
    | URL that carries another URL (open-redirect pattern) | 15 |
+   | login or account words in the hostname: `secure-login`, `verify-account` | 15 |
    | credential path (`/login`, `/verify`, `/account`, …) | 10 |
    | deep subdomain chain, abuse-heavy TLD | 10 each |
 
@@ -47,9 +51,17 @@ Reputation and model results are cached per URL (scheme, host and path) in D1. C
 expire after 6 hours, because domains are often registered clean and weaponised later. Flagged
 results last 7 days. URL signals are recomputed on every request.
 
+Lookalikes are found by comparing against a list of brands after decoding punycode and folding
+lookalike characters (Cyrillic, Greek, accented Latin, `0`→`o`, `rn`→`m`, …) to ASCII. Who owns a
+brand is decided by a list of its real registrable domains, never by the name alone.
+
+If Safe Browsing or Workers AI is unavailable, the scan still returns the verdict from the URL
+signals, and that result is not cached, so the next scan retries.
+
 **Privacy.** Only `scheme://host/path` is sent to Safe Browsing and to the model, and only that
 form is cached. The query string is never sent or stored, because email links often carry
-password-reset and session tokens there.
+password-reset and session tokens there. Some services put such tokens in the path instead
+(`/reset/<token>`), and those **are** sent and cached.
 
 ## Limitations
 
@@ -57,12 +69,19 @@ password-reset and session tokens there.
   reputation database. Without the Safe Browsing key, a well-built phishing page on a fresh,
   neutral-looking domain can pass.
 - **Brand list.** It is short and hand-picked (names of 5+ characters to avoid false positives).
-  Brands outside it rely on the model.
+  Brands outside it rely on the model. Country domains a brand owns but that are missing from
+  its list show up as lookalikes. That alone doesn't block, but it raises the score.
+- **Lookalike folding** covers the scripts used in common IDN attacks, not all of Unicode's
+  confusables.
+- **Registries in the PSL's private section** (`uk.com`, `eu.com`, …) count as shared hosts.
 - **Unchecked data.** Domain age, TLS certificates and page content are not checked yet.
 - **Caller identification by Origin** stops other websites' JavaScript, but any non-browser
   client can send a forged `Origin` header. Those requests still go through the rate limits.
 - **Rate limits** live in Workers KV, which is eventually consistent, so the limits are
   approximate under bursts.
+- **Cache misses cost money.** The cache is per URL, so a client that scans random paths misses
+  it every time, and each miss can cost a Safe Browsing lookup and a model call. Only the
+  per-IP rate limits bound this.
 - **Commercial use.** The Safe Browsing API is for non-commercial use. A commercial deployment
   should use Google's Web Risk API instead.
 
@@ -111,9 +130,9 @@ Response:
 ```json
 {
   "blocked": true,
-  "reason": "Brand name used as a subdomain of an unrelated site; path asks for a login or account action",
-  "score": 60,
-  "signals": ["brand_in_subdomain", "credential_path"]
+  "reason": "Brand name used as a subdomain of an unrelated site; hostname contains login or account words; path asks for a login or account action",
+  "score": 75,
+  "signals": ["brand_in_subdomain", "credential_host", "credential_path"]
 }
 ```
 
