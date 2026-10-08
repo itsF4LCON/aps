@@ -20,3 +20,14 @@ binding = "AI"
 [[kv_namespaces]]
 binding = "RATE_LIMIT_KV"
 id = "14e2750166bc4cf89cd48766b57d8e72"
+
+# /scan limits per client (IPv4 address or IPv6 /64). period must be 10 or 60.
+[[ratelimits]]
+name = "SCAN_LIMITER"
+namespace_id = "1001"
+simple = { limit = 30, period = 60 }
+
+[[ratelimits]]
+name = "DEMO_LIMITER"
+namespace_id = "1002"
+simple = { limit = 5, period = 60 }

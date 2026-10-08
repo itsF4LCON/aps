@@ -10,11 +10,9 @@ use serde::{Deserialize, Serialize};
 use target::validate_url;
 use worker::*;
 
-const SCAN_RATE_LIMIT_MAX: u64 = 30;
-const SCAN_RATE_LIMIT_WINDOW_SECS: u64 = 60;
-
-const DEMO_RATE_LIMIT_MAX: u64 = 5;
-const DEMO_RATE_LIMIT_WINDOW_SECS: u64 = 60;
+/// Rate Limiting bindings for `/scan`; their limits live in wrangler.toml.
+const SCAN_LIMITER: &str = "SCAN_LIMITER";
+const DEMO_LIMITER: &str = "DEMO_LIMITER";
 
 const KEYGEN_RATE_LIMIT_MAX: u64 = 3;
 const KEYGEN_RATE_LIMIT_WINDOW_SECS: u64 = 60 * 60;
@@ -139,6 +137,15 @@ fn client_ip(req: &Request) -> String {
     client::rate_limit_key(&ip)
 }
 
+/// `/scan` limits use Cloudflare's Rate Limiting binding: counted in memory per
+/// location, with no read-then-write race and no KV write per scan.
+async fn scan_limited(env: &Env, binding: &str, ip: &str) -> Result<bool> {
+    let outcome = env.rate_limiter(binding)?.limit(ip.to_string()).await?;
+    Ok(!outcome.success)
+}
+
+/// KV fixed window, for `/keygen` only: its hourly window is longer than the
+/// Rate Limiting binding's maximum period of 60 seconds.
 async fn is_rate_limited(
     kv: &kv::KvStore,
     prefix: &str,
@@ -229,12 +236,11 @@ pub async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
     }
 
     let ip = client_ip(&req);
-    let kv = env.kv("RATE_LIMIT_KV")?;
-    let (rl_prefix, rl_max, rl_window) = match caller {
-        Caller::Site(_) => ("demo", DEMO_RATE_LIMIT_MAX, DEMO_RATE_LIMIT_WINDOW_SECS),
-        _ => ("scan", SCAN_RATE_LIMIT_MAX, SCAN_RATE_LIMIT_WINDOW_SECS),
+    let limiter = match caller {
+        Caller::Site(_) => DEMO_LIMITER,
+        _ => SCAN_LIMITER,
     };
-    if is_rate_limited(&kv, rl_prefix, &ip, rl_max, rl_window).await? {
+    if scan_limited(&env, limiter, &ip).await? {
         let mut res = err("Rate limit exceeded. Try again in 60 seconds.", 429)?;
         res.headers_mut().set("Retry-After", "60")?;
         add_cors_headers(&mut res, &caller)?;

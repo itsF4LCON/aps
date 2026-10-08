@@ -79,14 +79,16 @@ password-reset and session tokens there. Some services put such tokens in the pa
 - **Unchecked data.** Domain age, TLS certificates and page content are not checked yet.
 - **Caller identification by Origin** stops other websites' JavaScript, but any non-browser
   client can send a forged `Origin` header. Those requests still go through the rate limits.
-- **Rate limits** live in Workers KV, which is eventually consistent, so the limits are
-  approximate under bursts.
+- **Rate limits are approximate.** `/scan` uses Cloudflare's Rate Limiting binding, which counts
+  per Cloudflare location and is eventually consistent by design, so a client spread over many
+  locations, or a fast burst, can get a little past the limit. `/keygen` uses Workers KV, which
+  is eventually consistent too. Exact global limits would need a Durable Object.
 - **Query strings on trusted hosts.** Any URL with a query string, even
   `accounts.google.com/signin?continue=…`, goes through the full analysis, which costs a
   lookup and possibly a model call.
 - **Cache misses cost money.** The cache is per URL, so a client that scans random paths misses
   it every time, and each miss can cost a Safe Browsing lookup and a model call. Only the
-  per-IP rate limits bound this.
+  per-client rate limits bound this.
 - **Commercial use.** The Safe Browsing API is for non-commercial use. A commercial deployment
   should use Google's Web Risk API instead.
 
@@ -106,8 +108,11 @@ Requests that match none of these get `401 Unauthorized`.
 
 ## Rate limits
 
-Fixed-window, per client, tracked in Workers KV. A client is an IPv4 address or an IPv6 /64
-prefix, since one IPv6 connection can usually pick any address in its /64:
+Per client, where a client is an IPv4 address or an IPv6 /64 prefix, since one IPv6 connection
+can usually pick any address in its /64. `/scan` uses Cloudflare's
+[Rate Limiting binding](https://developers.cloudflare.com/workers/runtime-apis/bindings/rate-limit/),
+configured in [`wrangler.toml`](wrangler.toml). `/keygen` needs an hourly window, longer than the
+binding allows, so it uses a fixed window in Workers KV:
 
 | Endpoint  | Limit           |
 |-----------|-----------------|
@@ -116,7 +121,8 @@ prefix, since one IPv6 connection can usually pick any address in its /64:
 | `/keygen` | 3 / hour        |
 
 `/keygen` is stricter because each call writes a new row to `api_keys`. An unlimited endpoint
-would let one IP mint unbounded keys.
+would let one IP mint unbounded keys. Extra keys buy no extra scans, since `/scan` is limited per
+client and not per key.
 
 ## API
 
