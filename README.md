@@ -69,6 +69,41 @@ form is cached. The query string is never sent or stored, because email links of
 password-reset and session tokens there. Some services put such tokens in the path instead
 (`/reset/<token>`), and those **are** sent and cached.
 
+## Evaluation
+
+How well does the URL alone give phishing away? [`examples/eval.rs`](examples/eval.rs) runs the
+deterministic layer (trusted hosts, then URL signals and the verdict, exactly as `/scan` does)
+over known phishing and known legitimate URLs. Safe Browsing, the phishing feed, domain age and
+the model are left out: they need the network, and the feed is the phishing set itself.
+
+- **Phishing:** every URL in the [OpenPhish](https://openphish.com) community feed from
+  2026-09-09 to 2026-10-08 (12,807 URLs on 9,870 hosts, feed commit `ddee277`).
+- **Legitimate:** the top 10,000 domains of the [Tranco](https://tranco-list.eu) list `K9Z7W`,
+  as `https://domain/`.
+
+| | URLs | blocked | rate |
+|---|---:|---:|---:|
+| phishing | 12,807 | 520 | **4.1% detection** |
+| phishing, one URL per host | 9,870 | 467 | 4.7% detection |
+| legitimate | 10,000 | 0 | **0.00% false positives** |
+
+The URL signals are tuned to never block a real site on their own, and they don't. They catch
+only phishing that names a brand in its URL, which is a small share. Most OpenPhish URLs sit on
+shared hosting (47% fire `shared_host`) or on throwaway domains with neutral names. Those URLs
+look like anything else from the outside, and catching them is left to the reputation feed,
+Safe Browsing, domain age and the model.
+
+Caveats: the legitimate set is bare homepages, the easiest case. Real links carry paths and
+subdomains, so the real false-positive rate is higher. Precision depends on the mix of phishing
+and legitimate traffic, so detection and false-positive rates are given instead.
+
+To reproduce:
+
+```bash
+eval/fetch.sh 30 10000     # downloads into eval/data (git-ignored)
+cargo run --release --example eval -- eval/data/phish.txt eval/data/benign.txt
+```
+
 ## Limitations
 
 - **Heuristics.** The signals and the model catch common phishing patterns, but they are not a
