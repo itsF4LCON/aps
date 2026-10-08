@@ -52,6 +52,11 @@ Reputation and model results are cached per URL (scheme, host and path) in D1. C
 expire after 6 hours, because domains are often registered clean and weaponised later. Flagged
 results last 7 days. URL signals are recomputed on every request.
 
+Who scanned a URL first doesn't matter. The cache holds only what Safe Browsing and the model say
+about the URL itself, and the model never sees the page. Scanning your own domain while it is
+still harmless and weaponising it later gets you the same answers a later scan would. The only
+thing that can go stale is a clean Safe Browsing result, for at most 6 hours.
+
 Lookalikes are found by comparing against a list of brands after decoding punycode and folding
 lookalike characters (Cyrillic, Greek, accented Latin, `0`→`o`, `rn`→`m`, …) to ASCII. Who owns a
 brand is decided by a list of its real registrable domains, never by the name alone.
@@ -77,8 +82,12 @@ password-reset and session tokens there. Some services put such tokens in the pa
   confusables.
 - **Registries in the PSL's private section** (`uk.com`, `eu.com`, …) count as shared hosts.
 - **Unchecked data.** Domain age, TLS certificates and page content are not checked yet.
-- **Caller identification by Origin** stops other websites' JavaScript, but any non-browser
-  client can send a forged `Origin` header. Those requests still go through the rate limits.
+- **Caller identification by Origin** stops other websites' JavaScript, but it is not
+  authentication: any non-browser client can send a forged `Origin` header. A key couldn't
+  fix that, because anything shipped inside the extension can be extracted, and keys are free
+  anyway. So the extension and demo paths are treated as public. A forged extension origin
+  shares the limit an API key gets (30/minute per client), and a forged demo origin gets 5/minute.
+  Forging saves a `/keygen` call and gains nothing else.
 - **Rate limits are approximate.** `/scan` uses Cloudflare's Rate Limiting binding, which counts
   per Cloudflare location and is eventually consistent by design, so a client spread over many
   locations, or a fast burst, can get a little past the limit. `/keygen` uses Workers KV, which
