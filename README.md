@@ -78,8 +78,9 @@ It counts only together with other signals, for example a fresh `secure-login.ex
 scores 60. IPs and shared hosts are skipped, and so are TLDs without an RDAP server (several
 country codes, `.de` among them).
 
-If Safe Browsing, RDAP or Workers AI is unavailable, the scan still returns a verdict from what
-it has, and that result is not cached, so the next scan retries.
+If Safe Browsing or Workers AI is unavailable, the scan still returns a verdict from what it
+has, and that result is not cached, so the next scan retries. If RDAP fails, the scan goes on
+without the domain age, and the next scan of that domain asks again.
 
 **Privacy.** Only `scheme://host/path` is sent to Safe Browsing and to the model, and only that
 form is cached. The query string is never sent or stored, because email links often carry
@@ -140,7 +141,8 @@ Europe: median time to first byte as the client sees it, including the network.
 | new URL on a known domain (model call) | 469 ms |
 | new URL on a new domain (RDAP + model) | 673 ms |
 
-A cached scan is a few D1 queries in sequence (key check, feed, then cache and domain age in
+Safe Browsing was not configured during these measurements. With a key set, a new URL also
+waits for that lookup. A cached scan is a few D1 queries in sequence (key check, feed, then cache and domain age in
 parallel), not a single lookup. Most of the time for a new URL is the model.
 
 ## Limitations
