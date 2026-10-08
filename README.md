@@ -106,7 +106,8 @@ Requests that match none of these get `401 Unauthorized`.
 
 ## Rate limits
 
-Fixed-window, per-IP, tracked in Workers KV:
+Fixed-window, per client, tracked in Workers KV. A client is an IPv4 address or an IPv6 /64
+prefix, since one IPv6 connection can usually pick any address in its /64:
 
 | Endpoint  | Limit           |
 |-----------|-----------------|

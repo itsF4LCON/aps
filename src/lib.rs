@@ -1,4 +1,5 @@
 pub mod cache;
+pub mod client;
 pub mod policy;
 pub mod reputation;
 pub mod signals;
@@ -127,12 +128,15 @@ fn add_cors_headers(response: &mut Response, caller: &Caller) -> Result<()> {
     Ok(())
 }
 
+/// Rate-limit key for the caller: the IP, or its /64 for IPv6.
 fn client_ip(req: &Request) -> String {
-    req.headers()
+    let ip = req
+        .headers()
         .get("CF-Connecting-IP")
         .ok()
         .flatten()
-        .unwrap_or_else(|| "unknown".into())
+        .unwrap_or_default();
+    client::rate_limit_key(&ip)
 }
 
 async fn is_rate_limited(
