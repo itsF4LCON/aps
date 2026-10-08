@@ -185,6 +185,8 @@ pub enum Signal {
     CredentialPath,
     DeepSubdomain,
     RiskyTld,
+    /// Added from the RDAP lookup, not by [`analyze`].
+    NewDomain,
 }
 
 impl Signal {
@@ -198,6 +200,7 @@ impl Signal {
             Signal::UserinfoInUrl => 40,
             Signal::IpLiteralHost => 30,
             Signal::PunycodeHost => 25,
+            Signal::NewDomain => 25,
             Signal::BrandInPath => 15,
             Signal::SharedHost => 15,
             Signal::EmbeddedRedirect => 15,
@@ -225,6 +228,7 @@ impl Signal {
             Signal::CredentialPath => "path asks for a login or account action",
             Signal::DeepSubdomain => "unusually deep subdomain chain",
             Signal::RiskyTld => "top-level domain heavily used for abuse",
+            Signal::NewDomain => "domain registered less than 30 days ago",
         }
     }
 }
@@ -333,6 +337,15 @@ fn has_credential_word(path: &str) -> bool {
         .map(|w| w.to_string())
         .chain(pairs)
         .any(|w| CREDENTIAL_WORDS.iter().any(|c| w.starts_with(c)))
+}
+
+/// Adds `signal` before the first weaker one, keeping the list strongest first.
+pub fn insert(signals: &mut Vec<Signal>, signal: Signal) {
+    let at = signals
+        .iter()
+        .position(|s| s.weight() < signal.weight())
+        .unwrap_or(signals.len());
+    signals.insert(at, signal);
 }
 
 /// Sum of weights, capped at 100.
@@ -692,6 +705,35 @@ mod tests {
         let mut sorted = weights.clone();
         sorted.sort_by(|a, b| b.cmp(a));
         assert_eq!(weights, sorted);
+    }
+
+    #[test]
+    fn new_domain_keeps_the_order_and_decides_only_with_company() {
+        let mut s = sig("https://secure-login.example.top/login");
+        assert_eq!(
+            s,
+            [
+                Signal::CredentialHost,
+                Signal::CredentialPath,
+                Signal::RiskyTld
+            ]
+        );
+        assert!(score(&s) < BLOCK_THRESHOLD);
+        insert(&mut s, Signal::NewDomain);
+        assert_eq!(s[0], Signal::NewDomain);
+        assert_eq!(score(&s), BLOCK_THRESHOLD);
+
+        let mut alone = sig("https://example.com/");
+        insert(&mut alone, Signal::NewDomain);
+        assert!(
+            score(&alone) < BLOCK_THRESHOLD,
+            "a new domain alone must not block"
+        );
+
+        let mut combo = sig("https://paypal-verify.example/");
+        insert(&mut combo, Signal::NewDomain);
+        assert_eq!(combo[0], Signal::BrandCombosquat);
+        assert_eq!(combo[1], Signal::NewDomain);
     }
 
     #[test]

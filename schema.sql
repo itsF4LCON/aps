@@ -19,3 +19,9 @@ CREATE TABLE IF NOT EXISTS feed_urls (
     last_seen INTEGER NOT NULL      -- Unix seconds of the last refresh that listed it
 );
 CREATE INDEX IF NOT EXISTS idx_feed_urls_host ON feed_urls(host);
+
+CREATE TABLE IF NOT EXISTS domain_age (
+    domain        TEXT    PRIMARY KEY,  -- registrable domain, e.g. example.co.uk
+    registered_at INTEGER,              -- Unix seconds; NULL if the registry didn't say
+    checked_at    INTEGER NOT NULL      -- Unix seconds
+);

@@ -18,3 +18,4 @@ psl = "2.1.240"
 serde_json = "1.0.151"
 idna = "1"
 percent-encoding = "2"
+futures-util = { version = "0.3", default-features = false }

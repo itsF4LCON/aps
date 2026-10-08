@@ -33,6 +33,7 @@ can clear a URL that an earlier layer flagged.
    | text before `@` hiding the real host | 40 |
    | raw IP address | 30 |
    | punycode hostname | 25 |
+   | domain registered less than 30 days ago (from RDAP, see below) | 25 |
    | brand in the path of an unrelated site | 15 |
    | shared host where anyone can publish (PSL private suffixes, Google Sites/Forms/Drive, SharePoint, …) | 15 |
    | URL that carries another URL (open-redirect pattern) | 15 |
@@ -69,13 +70,22 @@ Lookalikes are found by comparing against a list of brands after decoding punyco
 lookalike characters (Cyrillic, Greek, accented Latin, `0`→`o`, `rn`→`m`, …) to ASCII. Who owns a
 brand is decided by a list of its real registrable domains, never by the name alone.
 
-If Safe Browsing or Workers AI is unavailable, the scan still returns the verdict from the URL
-signals, and that result is not cached, so the next scan retries.
+Domain age comes from [RDAP](https://about.rdap.org), the successor of WHOIS. The registry's
+server is found through IANA's bootstrap file (cached for a day), and the registration date is
+cached per domain in D1 for 30 days. It runs in parallel with the cache read and Safe Browsing,
+with a 1.5 s limit. A new domain alone never blocks: new businesses register domains every day.
+It counts only together with other signals, for example a fresh `secure-login.example.top/login`
+scores 60. IPs and shared hosts are skipped, and so are TLDs without an RDAP server (several
+country codes, `.de` among them).
+
+If Safe Browsing, RDAP or Workers AI is unavailable, the scan still returns a verdict from what
+it has, and that result is not cached, so the next scan retries.
 
 **Privacy.** Only `scheme://host/path` is sent to Safe Browsing and to the model, and only that
 form is cached. The query string is never sent or stored, because email links often carry
 password-reset and session tokens there. Some services put such tokens in the path instead
-(`/reset/<token>`), and those **are** sent and cached.
+(`/reset/<token>`), and those **are** sent and cached. The domain registry sees only the
+registered domain (`example.co.uk`), never the hostname or path.
 
 ## Evaluation
 
@@ -124,7 +134,8 @@ cargo run --release --example eval -- eval/data/phish.txt eval/data/benign.txt
 - **Lookalike folding** covers the scripts used in common IDN attacks, not all of Unicode's
   confusables.
 - **Registries in the PSL's private section** (`uk.com`, `eu.com`, …) count as shared hosts.
-- **Unchecked data.** Domain age, TLS certificates and page content are not checked yet.
+- **Unchecked data.** TLS certificates and page content are not checked yet. Domain age is
+  unknown for TLDs without RDAP.
 - **Caller identification by Origin** stops other websites' JavaScript, but it is not
   authentication: any non-browser client can send a forged `Origin` header. A key couldn't
   fix that, because anything shipped inside the extension can be extracted, and keys are free

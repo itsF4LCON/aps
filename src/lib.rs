@@ -2,6 +2,7 @@ pub mod cache;
 pub mod client;
 pub mod feed;
 pub mod policy;
+pub mod rdap;
 pub mod reputation;
 pub mod signals;
 pub mod target;
@@ -339,27 +340,33 @@ async fn gather_evidence(env: &Env, target: &target::Target) -> Result<verdict::
         evidence.feed_listed = true;
         return Ok(evidence);
     }
-    let cached = db
-        .prepare(
-            "SELECT reputation, ai_block, ai_reason, checked_at \
-             FROM verdict_cache WHERE url = ?1",
-        )
-        .bind(&[target.lookup_url.clone().into()])?
-        .first::<CacheRow>(None)
-        .await?;
+    // The domain age (cached per domain, otherwise an RDAP request) is looked
+    // up alongside the cache and Safe Browsing.
+    let (registered_at, remote) = futures_util::future::join(
+        domain_registered_at(&db, target, now),
+        cached_or_lookup(env, &db, target, now),
+    )
+    .await;
+    if registered_at.is_some_and(|r| rdap::is_new(r, now)) {
+        signals::insert(&mut evidence.signals, signals::Signal::NewDomain);
+    }
+    let (cached, lookup) = remote?;
     if let Some(row) = cached {
-        let flagged = row.reputation.is_some() || row.ai_block == Some(1);
+        let fresh = cache_row_fresh(&row, now);
         evidence.reputation = row.reputation;
         evidence.ai = row
             .ai_block
             .map(|b| (b == 1, row.ai_reason.unwrap_or_default()));
         let complete = evidence.ai.is_some() || !verdict::needs_ai(&evidence);
-        if complete && cache::is_fresh(row.checked_at, now, flagged) {
+        if complete && fresh {
             return Ok(evidence);
         }
     }
 
-    let lookup = safe_browsing(env, target).await;
+    let lookup = match lookup {
+        Some(l) => l,
+        None => safe_browsing(env, target).await,
+    };
     // A failed re-check must not erase a listing we already know about.
     if lookup != reputation::Lookup::Failed {
         evidence.reputation = lookup.threat();
@@ -400,6 +407,137 @@ async fn gather_evidence(env: &Env, target: &target::Target) -> Result<verdict::
     .run()
     .await?;
     Ok(evidence)
+}
+
+fn cache_row_fresh(row: &CacheRow, now: i64) -> bool {
+    let flagged = row.reputation.is_some() || row.ai_block == Some(1);
+    cache::is_fresh(row.checked_at, now, flagged)
+}
+
+/// The cached row for the URL, plus a Safe Browsing lookup unless that row is
+/// still fresh.
+async fn cached_or_lookup(
+    env: &Env,
+    db: &D1Database,
+    target: &target::Target,
+    now: i64,
+) -> Result<(Option<CacheRow>, Option<reputation::Lookup>)> {
+    let cached = db
+        .prepare(
+            "SELECT reputation, ai_block, ai_reason, checked_at \
+             FROM verdict_cache WHERE url = ?1",
+        )
+        .bind(&[target.lookup_url.clone().into()])?
+        .first::<CacheRow>(None)
+        .await?;
+    let lookup = match &cached {
+        Some(row) if cache_row_fresh(row, now) => None,
+        _ => Some(safe_browsing(env, target).await),
+    };
+    Ok((cached, lookup))
+}
+
+/// Registration and bootstrap lookups together must finish within this.
+const RDAP_TIMEOUT_MS: u64 = 1500;
+
+#[derive(Deserialize)]
+struct AgeRow {
+    registered_at: Option<i64>,
+    checked_at: i64,
+}
+
+/// When the scanned domain was registered, or `None` if unknown. Failed
+/// lookups are logged and not cached, and never fail the scan.
+async fn domain_registered_at(db: &D1Database, target: &target::Target, now: i64) -> Option<i64> {
+    let domain = rdap::domain_to_check(target)?;
+    match domain_age(db, domain, now).await {
+        Ok(r) => r,
+        Err(e) => {
+            console_warn!("rdap lookup for {domain} failed: {e}");
+            None
+        }
+    }
+}
+
+async fn domain_age(db: &D1Database, domain: &str, now: i64) -> Result<Option<i64>> {
+    let row = db
+        .prepare("SELECT registered_at, checked_at FROM domain_age WHERE domain = ?1")
+        .bind(&[domain.into()])?
+        .first::<AgeRow>(None)
+        .await?;
+    if let Some(r) = row {
+        if rdap::is_fresh(r.checked_at, now, r.registered_at.is_some()) {
+            return Ok(r.registered_at);
+        }
+    }
+    let lookup = Box::pin(rdap_lookup(domain));
+    let timeout = Delay::from(std::time::Duration::from_millis(RDAP_TIMEOUT_MS));
+    let registered_at = match futures_util::future::select(lookup, timeout).await {
+        futures_util::future::Either::Left((r, _)) => r?,
+        futures_util::future::Either::Right(_) => {
+            return Err(Error::RustError("timed out".into()));
+        }
+    };
+    db.prepare(
+        "INSERT INTO domain_age (domain, registered_at, checked_at) VALUES (?1, ?2, ?3) \
+         ON CONFLICT(domain) DO UPDATE SET \
+           registered_at = excluded.registered_at, checked_at = excluded.checked_at",
+    )
+    .bind(&[
+        domain.into(),
+        nullable(registered_at.map(|r| r as f64)),
+        (now as f64).into(),
+    ])?
+    .run()
+    .await?;
+    Ok(registered_at)
+}
+
+/// `Ok(None)` when the TLD has no RDAP server or the registry has no date.
+async fn rdap_lookup(domain: &str) -> Result<Option<i64>> {
+    // The bootstrap changes a few times a month; let Cloudflare cache it.
+    let mut bootstrap = rdap_get(rdap::BOOTSTRAP_URL, Some(24 * 60 * 60)).await?;
+    if bootstrap.status_code() != 200 {
+        return Err(Error::RustError(format!(
+            "bootstrap HTTP {}",
+            bootstrap.status_code()
+        )));
+    }
+    let Some(url) = rdap::query_url(&bootstrap.json().await?, domain) else {
+        return Ok(None);
+    };
+    let mut res = rdap_get(&url, None).await?;
+    match res.status_code() {
+        200 => Ok(rdap::registered_at(&res.json().await?)),
+        404 => Ok(None),
+        status => Err(Error::RustError(format!("HTTP {status}"))),
+    }
+}
+
+/// One retry on a network error: registries close idle keep-alive connections,
+/// and a request sent on a dead pooled connection fails at once.
+async fn rdap_get(url: &str, cache_secs: Option<i32>) -> Result<Response> {
+    match rdap_get_once(url, cache_secs).await {
+        Ok(res) => Ok(res),
+        Err(_) => rdap_get_once(url, cache_secs).await,
+    }
+}
+
+async fn rdap_get_once(url: &str, cache_secs: Option<i32>) -> Result<Response> {
+    let headers = Headers::new();
+    headers.set("Accept", "application/rdap+json, application/json")?;
+    let mut init = RequestInit::new();
+    init.with_headers(headers);
+    if let Some(ttl) = cache_secs {
+        init.with_cf_properties(CfProperties {
+            cache_everything: Some(true),
+            cache_ttl: Some(ttl),
+            ..CfProperties::default()
+        });
+    }
+    Fetch::Request(Request::new_with_init(url, &init)?)
+        .send()
+        .await
 }
 
 /// Whether the URL, or its host when the host isn't shared, is in the feed.
