@@ -15,6 +15,8 @@ pub struct Evidence {
     pub signals: Vec<Signal>,
     /// Threat label from a reputation feed (Google Safe Browsing), if listed.
     pub reputation: Option<String>,
+    /// The URL, or its host if not shared, is in the OpenPhish feed.
+    pub feed_listed: bool,
     /// The model's answer, if it was consulted: (said BLOCK, its explanation).
     pub ai: Option<(bool, String)>,
 }
@@ -26,10 +28,10 @@ pub struct Verdict {
     pub reason: String,
 }
 
-/// Whether the model is worth asking: only while neither the reputation feed
-/// nor the URL signals have already decided to block.
+/// Whether the model is worth asking: only while neither a listing nor the
+/// URL signals have already decided to block.
 pub fn needs_ai(e: &Evidence) -> bool {
-    e.reputation.is_none() && score(&e.signals) < BLOCK_THRESHOLD
+    e.reputation.is_none() && !e.feed_listed && score(&e.signals) < BLOCK_THRESHOLD
 }
 
 pub fn decide(e: &Evidence) -> Verdict {
@@ -38,6 +40,13 @@ pub fn decide(e: &Evidence) -> Verdict {
             blocked: true,
             score: 100,
             reason: format!("Listed by Google Safe Browsing as {threat}."),
+        };
+    }
+    if e.feed_listed {
+        return Verdict {
+            blocked: true,
+            score: 100,
+            reason: "Listed by the OpenPhish phishing feed.".into(),
         };
     }
     let ai_block = e.ai.as_ref().is_some_and(|(b, _)| *b);
@@ -181,6 +190,20 @@ mod tests {
             v.reason,
             "Listed by Google Safe Browsing as phishing / social engineering."
         );
+    }
+
+    #[test]
+    fn feed_listing_blocks_whatever_else_was_cached() {
+        let e = Evidence {
+            feed_listed: true,
+            ai: Some((false, "SAFE".into())),
+            ..Evidence::default()
+        };
+        assert!(!needs_ai(&e));
+        let v = decide(&e);
+        assert!(v.blocked);
+        assert_eq!(v.score, 100);
+        assert_eq!(v.reason, "Listed by the OpenPhish phishing feed.");
     }
 
     #[test]

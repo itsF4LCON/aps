@@ -14,6 +14,10 @@ binding = "phishing_db"
 database_name = "phishing-db"
 database_id = "3e092132-26aa-46dc-817b-a6d517b16743"
 
+# Pull the OpenPhish feed shortly after its 00:00 and 12:00 UTC updates.
+[triggers]
+crons = ["20 0,12 * * *"]
+
 [ai]
 binding = "AI"
 

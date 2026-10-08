@@ -40,10 +40,18 @@ can clear a URL that an earlier layer flagged.
    | credential path (`/login`, `/verify`, `/account`, …) | 10 |
    | deep subdomain chain, abuse-heavy TLD | 10 each |
 
-4. **Reputation** (optional). If the `SAFE_BROWSING_API_KEY` secret is set, the URL is looked up
+4. **Phishing feed.** A cron trigger pulls the [OpenPhish](https://openphish.com) community feed
+   into D1 twice a day, shortly after each update, and keeps entries for 3 days after they
+   leave it. A scan matches on its exact URL (without query string), or on its whole host unless
+   the host is shared: a phishing kit usually owns its host, but on `*.pages.dev` or an S3 bucket
+   the next page belongs to someone else. A listing blocks outright. This check runs before the
+   cache is read, so a URL cached as clean is still caught once it is listed. (URLhaus was left
+   out: it lists malware downloads, not phishing, and its ~30k entries would cost far more D1
+   writes per refresh.)
+5. **Reputation** (optional). If the `SAFE_BROWSING_API_KEY` secret is set, the URL is looked up
    in the [Google Safe Browsing](https://developers.google.com/safe-browsing) Lookup API. A
    listing blocks outright.
-5. **Language model.** Only while the score is below the threshold, Workers AI
+6. **Language model.** Only while the score is below the threshold, Workers AI
    (`@cf/meta/llama-3.1-8b-instruct-fast`) is asked whether the URL impersonates a brand or service
    that the brand list doesn't cover. A BLOCK answer blocks. A SAFE answer changes nothing, so
    text injected into a URL can at most cause a false positive.
@@ -133,8 +141,8 @@ cargo run --release --example eval -- eval/data/phish.txt eval/data/benign.txt
 - **Cache misses cost money.** The cache is per URL, so a client that scans random paths misses
   it every time, and each miss can cost a Safe Browsing lookup and a model call. Only the
   per-client rate limits bound this.
-- **Commercial use.** The Safe Browsing API is for non-commercial use. A commercial deployment
-  should use Google's Web Risk API instead.
+- **Commercial use.** The Safe Browsing API and the OpenPhish community feed are for
+  non-commercial use only. A commercial deployment should use Google's Web Risk API and a paid feed.
 
 ## Auth
 
@@ -245,11 +253,14 @@ npx wrangler d1 execute phishing-db --remote --file=./schema.sql
 npx wrangler deploy
 ```
 
-An existing deployment created from an older `schema.sql` also needs the new cache table:
+An existing deployment created from an older `schema.sql` needs the newer tables:
 
 ```bash
-npx wrangler d1 execute phishing-db --remote --file=./migrations/0001_verdict_cache.sql
+npx wrangler d1 migrations apply phishing-db --remote
 ```
+
+The feed table fills at the next cron run (00:20 or 12:20 UTC). Locally, run
+`npx wrangler dev --test-scheduled` and open `/__scheduled` to fill it right away.
 
 After deploying, set `EXTENSION_ORIGINS` in [`src/lib.rs`](src/lib.rs) to the real extension ID
 (`about:debugging` after loading unpacked) and redeploy. Otherwise the extension gets `401` from

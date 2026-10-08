@@ -1,5 +1,6 @@
 pub mod cache;
 pub mod client;
+pub mod feed;
 pub mod policy;
 pub mod reputation;
 pub mod signals;
@@ -333,6 +334,11 @@ async fn gather_evidence(env: &Env, target: &target::Target) -> Result<verdict::
     };
     let now = (Date::now().as_millis() / 1000) as i64;
     let db = env.d1("phishing_db")?;
+    // Before the cache: a URL cached as clean may have been listed since.
+    if feed_listed(&db, target).await? {
+        evidence.feed_listed = true;
+        return Ok(evidence);
+    }
     let cached = db
         .prepare(
             "SELECT reputation, ai_block, ai_reason, checked_at \
@@ -394,6 +400,58 @@ async fn gather_evidence(env: &Env, target: &target::Target) -> Result<verdict::
     .run()
     .await?;
     Ok(evidence)
+}
+
+/// Whether the URL, or its host when the host isn't shared, is in the feed.
+async fn feed_listed(db: &D1Database, target: &target::Target) -> Result<bool> {
+    let url = target.lookup_url.clone().into();
+    let stmt = match feed::host_to_match(target) {
+        Some(host) => db
+            .prepare("SELECT 1 FROM feed_urls WHERE url = ?1 OR host = ?2 LIMIT 1")
+            .bind(&[url, host.into()])?,
+        None => db
+            .prepare("SELECT 1 FROM feed_urls WHERE url = ?1 LIMIT 1")
+            .bind(&[url])?,
+    };
+    Ok(stmt.first::<i32>(Some("1")).await?.is_some())
+}
+
+/// Cron: pull the OpenPhish feed into `feed_urls` and drop entries that left
+/// it more than [`feed::RETAIN_SECS`] ago.
+#[event(scheduled)]
+pub async fn scheduled(_event: ScheduledEvent, env: Env, _ctx: ScheduleContext) {
+    match refresh_feed(&env).await {
+        Ok(n) => console_log!("openphish feed: {n} entries"),
+        Err(e) => console_error!("openphish feed refresh failed: {e}"),
+    }
+}
+
+async fn refresh_feed(env: &Env) -> Result<usize> {
+    let mut res = Fetch::Url(Url::parse(feed::URL)?).send().await?;
+    if res.status_code() != 200 {
+        return Err(Error::RustError(format!("HTTP {}", res.status_code())));
+    }
+    let entries = feed::parse(&res.text().await?);
+    // A broken download must not age out the whole table.
+    if entries.is_empty() {
+        return Err(Error::RustError("feed is empty".into()));
+    }
+    let now = (Date::now().as_millis() / 1000) as f64;
+    let db = env.d1("phishing_db")?;
+    let mut statements = Vec::new();
+    for chunk in entries.chunks(feed::ROWS_PER_INSERT) {
+        let params: Vec<wasm_bindgen::JsValue> = chunk
+            .iter()
+            .flat_map(|e| [e.url.clone().into(), e.host.clone().into(), now.into()])
+            .collect();
+        statements.push(db.prepare(feed::upsert_sql(chunk.len())).bind(&params)?);
+    }
+    statements.push(
+        db.prepare("DELETE FROM feed_urls WHERE last_seen < ?1")
+            .bind(&[(now - feed::RETAIN_SECS as f64).into()])?,
+    );
+    db.batch(statements).await?;
+    Ok(entries.len())
 }
 
 const AI_SYSTEM_PROMPT: &str = "You are a phishing detector for links found in \
