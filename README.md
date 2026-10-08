@@ -116,9 +116,10 @@ Caveats: the legitimate set is bare homepages, the easiest case. Real links carr
 subdomains, so the real false-positive rate is higher. Precision depends on the mix of phishing
 and legitimate traffic, so detection and false-positive rates are given instead.
 
-The model was not part of this run, since it costs a call per URL. In a spot check while timing
-the deployed Worker, it blocked 1 of 24 legitimate Tranco domains (`nya5.com`, as a
-"typosquat"). Its BLOCK answers are a real source of false positives.
+The model was not part of this run, since it costs a call per URL. In spot checks while timing
+the deployed Worker, it blocked 2 of 50 new URLs on legitimate Tranco domains. It called
+`nya5.com` a "typosquat", and it read the made-up path of `citi.com/aps-timing2` as a
+"suspicious subdomain". Its BLOCK answers are a real source of false positives.
 
 To reproduce:
 
@@ -129,21 +130,23 @@ cargo run --release --example eval -- eval/data/phish.txt eval/data/benign.txt
 
 ## Latency
 
-Measured on 2026-10-08 from Belgium, served by Cloudflare's Paris location with D1 in Western
-Europe: median time to first byte as the client sees it, including the network.
+Measured on 2026-10-08 against the deployed Worker with Safe Browsing enabled, from Belgium,
+served by Cloudflare's Paris location with D1 in Western Europe. Median time to first byte as
+the client sees it, including the network, over 10 to 15 requests each:
 
 | request | median |
 |---|---:|
-| network baseline (a `401`, no work done) | 38 ms |
-| trusted host | 90 ms |
-| cached URL, from the extension | 99 ms |
-| cached URL, with an API key (one more D1 query) | 136 ms |
-| new URL on a known domain (model call) | 469 ms |
-| new URL on a new domain (RDAP + model) | 673 ms |
+| network baseline (a `401`, no work done) | 41 ms |
+| trusted host | 70 ms |
+| cached URL, from the extension | 100 ms |
+| cached URL, with an API key (one more D1 query) | 123 ms |
+| new URL on a known domain (Safe Browsing + model) | 450 ms |
+| new URL on a new domain (Safe Browsing + RDAP + model) | 706 ms |
 
-Safe Browsing was not configured during these measurements. With a key set, a new URL also
-waits for that lookup. A cached scan is a few D1 queries in sequence (key check, feed, then cache and domain age in
-parallel), not a single lookup. Most of the time for a new URL is the model.
+A cached scan is a few D1 queries in sequence (key check, feed, then cache and domain age in
+parallel), not a single lookup. Most of the time for a new URL is the model. An earlier run the
+same day without Safe Browsing gave 469 ms and 673 ms for new URLs. The lookup runs in parallel
+with the cache read and RDAP, and the difference is within run-to-run noise.
 
 ## Limitations
 
