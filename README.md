@@ -115,12 +115,33 @@ Caveats: the legitimate set is bare homepages, the easiest case. Real links carr
 subdomains, so the real false-positive rate is higher. Precision depends on the mix of phishing
 and legitimate traffic, so detection and false-positive rates are given instead.
 
+The model was not part of this run, since it costs a call per URL. In a spot check while timing
+the deployed Worker, it blocked 1 of 24 legitimate Tranco domains (`nya5.com`, as a
+"typosquat"). Its BLOCK answers are a real source of false positives.
+
 To reproduce:
 
 ```bash
 eval/fetch.sh 30 10000     # downloads into eval/data (git-ignored)
 cargo run --release --example eval -- eval/data/phish.txt eval/data/benign.txt
 ```
+
+## Latency
+
+Measured on 2026-10-08 from Belgium, served by Cloudflare's Paris location with D1 in Western
+Europe: median time to first byte as the client sees it, including the network.
+
+| request | median |
+|---|---:|
+| network baseline (a `401`, no work done) | 38 ms |
+| trusted host | 90 ms |
+| cached URL, from the extension | 99 ms |
+| cached URL, with an API key (one more D1 query) | 136 ms |
+| new URL on a known domain (model call) | 469 ms |
+| new URL on a new domain (RDAP + model) | 673 ms |
+
+A cached scan is a few D1 queries in sequence (key check, feed, then cache and domain age in
+parallel), not a single lookup. Most of the time for a new URL is the model.
 
 ## Limitations
 
